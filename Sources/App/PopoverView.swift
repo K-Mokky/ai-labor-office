@@ -5,6 +5,7 @@ struct PopoverView: View {
     @ObservedObject var store: UsageStore
     var connectionID: String? = nil          // nil → onboarding (no connections yet)
     @AppStorage("menuBarUnit") private var unitKey = "percent"
+    @State private var showSettings = false
 
     private var unit: UnitKind { UnitKind(rawValue: unitKey) ?? .percent }
 
@@ -28,8 +29,10 @@ struct PopoverView: View {
                         summaryCards
                         modelSection
                         heatmapSection
-                        settingsSection
-                        connectSection
+                        if showSettings {
+                            settingsSection
+                            connectSection
+                        }
                     }
                     footer
                 }
@@ -53,6 +56,15 @@ struct PopoverView: View {
             Spacer()
             if let t = store.lastRefresh {
                 Text(t, style: .time).font(.caption2).foregroundStyle(.secondary)
+            }
+            if connection != nil {
+                Button {
+                    withAnimation { showSettings.toggle() }
+                } label: {
+                    Image(systemName: showSettings ? "gearshape.fill" : "gearshape")
+                }
+                .buttonStyle(.borderless)
+                .help("설정")
             }
             Button {
                 store.refresh()
@@ -259,6 +271,12 @@ struct PopoverView: View {
             Text("위젯: 데스크탑 우클릭 → '위젯 편집' 또는 알림 센터에서 'AI 노동청' 위젯을 추가하세요.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            Text("Made by KMokky")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .opacity(0.45)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 6)
         }
     }
 }
