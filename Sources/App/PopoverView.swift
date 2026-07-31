@@ -3,8 +3,10 @@ import AppKit
 
 struct PopoverView: View {
     @ObservedObject var store: UsageStore
+    @ObservedObject var updater: Updater
     var connectionID: String? = nil          // nil → onboarding (no connections yet)
     @AppStorage("menuBarUnit") private var unitKey = "percent"
+    @AppStorage("autoUpdate") private var autoUpdate = true
     @State private var showSettings = false
 
     private var unit: UnitKind { UnitKind(rawValue: unitKey) ?? .percent }
@@ -22,6 +24,7 @@ struct PopoverView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    updateBanner
                     if connection == nil {
                         onboarding
                         connectSection
@@ -41,6 +44,54 @@ struct PopoverView: View {
         }
         .frame(width: 384)
         .frame(maxHeight: 680)
+    }
+
+    // MARK: Update banner
+
+    @ViewBuilder private var updateBanner: some View {
+        switch updater.phase {
+        case .available(let r):
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles").foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("새 버전 \(r.tag) 사용 가능").font(.caption.bold())
+                    Text("현재 v\(Updater.currentVersionText)")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("업데이트") { updater.install(r) }.font(.caption)
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.tint.opacity(0.12)))
+        case .downloading(let r):
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("\(r.tag) 다운로드 중…").font(.caption)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.tint.opacity(0.12)))
+        case .installing(let r):
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("\(r.tag) 설치 중 — 곧 재시작됩니다").font(.caption)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.tint.opacity(0.12)))
+        case .failed(let msg):
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                Text(msg).font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("재시도") { updater.check() }.font(.caption)
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+        default:
+            EmptyView()
+        }
     }
 
     // MARK: Header
@@ -217,6 +268,22 @@ struct PopoverView: View {
             }
             .pickerStyle(.menu)
             .font(.caption)
+            Divider()
+            HStack {
+                Text("버전 v\(Updater.currentVersionText)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if updater.phase == .checking {
+                    ProgressView().controlSize(.small)
+                } else {
+                    if updater.phase == .upToDate {
+                        Text("최신 버전").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Button("업데이트 확인") { updater.check() }.font(.caption)
+                }
+            }
+            Toggle("새 버전이 있으면 자동으로 설치", isOn: $autoUpdate)
+                .font(.caption)
             Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 세션·주간은 Anthropic이 실제 적용하는 5시간·7일 한도 기준입니다(100% = 한도 소진). 한도를 읽지 못하면 역대 최대 기록 대비로 표시하고, 오늘은 항상 최고 일간 대비입니다.")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

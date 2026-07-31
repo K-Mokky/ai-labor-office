@@ -43,7 +43,9 @@
 
 1. `Resources/App-Info.plist`와 `Resources/Widget-Info.plist`의 `CFBundleShortVersionString`(필요시 `CFBundleVersion`)을 올린다.
 2. `./build.sh dmg` 실행 → `assets/`에 새 버전 파일이 추가된다 (기존 버전 파일은 그대로 유지).
-3. 커밋 후 푸시하면 GitHub에서 바로 내려받을 수 있다.
+3. 커밋 후 푸시하고, 앱 버전과 같은 태그로 릴리스를 만든다: `git tag v<버전> && git push origin v<버전>` 후 `gh release create v<버전> <dmg>`. 릴리스 에셋 파일명은 ASCII로 올린다(한글은 GitHub이 지워버림). `.dmg` 에셋이 꼭 있어야 앱 내 업데이트가 동작한다.
+
+앱은 실행 시(및 6시간마다) 최신 릴리스 태그를 확인해서, 현재 버전보다 높으면 DMG를 받아 스스로 교체하고 재시작합니다(`Sources/App/Updater.swift`). 자동 설치는 팝오버 설정에서 끌 수 있습니다.
 
 > ad-hoc 서명이므로 다른 맥에서는 첫 실행 시 우클릭 → 열기(Gatekeeper 우회)가 필요합니다.
 
@@ -53,7 +55,7 @@
 Sources/
   Shared/   Models.swift(데이터 모델·포맷·스냅샷 IO), Heatmap.swift(히트맵 캔버스)
   App/      AIUsageApp.swift(NSStatusItem+NSPopover, 연결별 아이콘), Connections.swift(AI 연결 모델),
-            PopoverView.swift, UsageStore.swift(수집·집계)
+            PopoverView.swift, UsageStore.swift(수집·집계), Updater.swift(GitHub 릴리스 자체 업데이트)
   Widget/   Widgets.swift(위젯 번들 4종)
 Resources/  Info.plist 2종, widget.entitlements, AppIcon.icns(icon.png 기반)
 build.sh    swiftc 직접 빌드 + codesign + 설치/DMG 패키징

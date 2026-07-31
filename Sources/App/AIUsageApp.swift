@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private let store = UsageStore()
+    private let updater = Updater()
+    private var updateTimer: Timer?
     private var entries: [Entry] = []
     private var popover: NSPopover?
     private var popoverAnchorID = ""
@@ -48,6 +50,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .store(in: &cancellables)
 
         syncStatusItems(with: store.connections)
+
+        // Update check: shortly after launch, then every 6 hours.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            MainActor.assumeIsolated { self?.updater.check() }
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updater.check() }
+        }
 
         // First run: open the connect menu so the user can hook up an AI.
         if store.connections.isEmpty {
@@ -112,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         p.behavior = .transient
         p.animates = false
         p.delegate = self
-        let root = PopoverView(store: store,
+        let root = PopoverView(store: store, updater: updater,
                                connectionID: entry.connectionID.isEmpty ? nil : entry.connectionID)
         let host = NSHostingController(rootView: root)
         host.sizingOptions = .preferredContentSize
