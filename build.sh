@@ -1,14 +1,14 @@
 #!/bin/bash
-# Build AI Usage.app (menu bar app + WidgetKit extension) without Xcode.
+# Build AI 노동청.app (menu bar app + WidgetKit extension) without Xcode.
 # Usage: ./build.sh [install|dmg]
 #   install  /Applications 에 설치 후 실행
-#   dmg      assets/AI-Usage-<버전>.dmg 생성 (버전은 Resources/App-Info.plist 기준)
+#   dmg      assets/AI-노동청-<버전>.dmg 생성 (버전은 Resources/App-Info.plist 기준)
 set -euo pipefail
 cd "$(dirname "$0")"
 
 TARGET="arm64-apple-macos14.0"
 BUILD=build
-APP="$BUILD/AI Usage.app"
+APP="$BUILD/AI 노동청.app"
 APPEX="$APP/Contents/Extensions/AIUsageWidget.appex"
 
 rm -rf "$BUILD"
@@ -36,9 +36,9 @@ codesign --force --sign - "$APP"
 echo "==> Built: $APP"
 
 if [[ "${1:-}" == "install" ]]; then
-  DEST="/Applications/AI Usage.app"
+  DEST="/Applications/AI 노동청.app"
   pkill -x AIUsage 2>/dev/null || true
-  rm -rf "$DEST"
+  rm -rf "$DEST" "/Applications/AI Usage.app"   # 구버전 번들도 정리
   cp -R "$APP" "$DEST"
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$DEST"
   open "$DEST"
@@ -52,13 +52,13 @@ fi
 if [[ "${1:-}" == "dmg" ]]; then
   VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/App-Info.plist)
   ASSETS=assets
-  DMG="$ASSETS/AI-Usage-$VERSION.dmg"
+  DMG="$ASSETS/AI-노동청-$VERSION.dmg"
   mkdir -p "$ASSETS"
   STAGE=$(mktemp -d)
   cp -R "$APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
   rm -f "$DMG"
-  hdiutil create -volname "AI Usage $VERSION" -srcfolder "$STAGE" -format UDZO -ov "$DMG" >/dev/null
+  hdiutil create -volname "AI 노동청 $VERSION" -srcfolder "$STAGE" -format UDZO -ov "$DMG" >/dev/null
   rm -rf "$STAGE"
   echo "==> DMG: $DMG"
 fi

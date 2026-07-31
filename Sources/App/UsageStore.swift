@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import SQLite3
 import WidgetKit
 
@@ -11,37 +12,79 @@ struct UsageEvent {
 }
 
 final class UsageStore: ObservableObject {
-    @Published var snapshot: UsageSnapshot?
+    @Published var connections: [AIConnection]
+    @Published var snapshots: [String: UsageSnapshot] = [:]  // connection id → snapshot
+    @Published var combined: UsageSnapshot?                  // all connections (widgets)
     @Published var lastError: String?
     @Published var lastRefresh: Date?
 
     private var timer: Timer?
 
     init() {
+        connections = ConnectionStore.load()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refresh()
         }
     }
 
+    // MARK: - Connection management
+
+    func addConnection(source: SourceKind, color: Color) {
+        guard !connections.contains(where: { $0.source == source }) else { return }
+        connections.append(AIConnection(id: UUID().uuidString,
+                                        source: source,
+                                        name: source.defaultName,
+                                        colorHex: color.hexRGB,
+                                        metricKey: "session"))
+        ConnectionStore.save(connections)
+        refresh()
+    }
+
+    func removeConnection(id: String) {
+        connections.removeAll { $0.id == id }
+        snapshots[id] = nil
+        ConnectionStore.save(connections)
+        refresh()
+    }
+
+    func updateConnection(_ c: AIConnection) {
+        guard let i = connections.firstIndex(where: { $0.id == c.id }) else { return }
+        connections[i] = c
+        ConnectionStore.save(connections)
+    }
+
+    // MARK: - Refresh
+
     func refresh() {
+        let conns = connections
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            var events: [UsageEvent] = []
             var errors: [String] = []
-            do {
-                events += try Self.loadGJCStats()
-            } catch {
-                errors.append("gjc: \(error.localizedDescription)")
+            var bySource: [SourceKind: [UsageEvent]] = [:]
+            for source in Set(conns.map(\.source)) {
+                switch source {
+                case .gjc:
+                    do { bySource[.gjc] = try Self.loadGJCStats() }
+                    catch { errors.append("gjc: \(error.localizedDescription)") }
+                case .claudeCode:
+                    bySource[.claudeCode] = Self.loadClaudeProjects()
+                }
             }
-            events += Self.loadClaudeProjects()
 
-            let snap = Self.aggregate(events: events)
+            let now = Date()
+            var snaps: [String: UsageSnapshot] = [:]
+            for c in conns {
+                snaps[c.id] = Self.aggregate(events: bySource[c.source] ?? [], now: now)
+            }
+            let combined = Self.aggregate(events: bySource.values.flatMap { $0 }, now: now)
+
             DispatchQueue.main.async {
-                self.snapshot = snap
+                self.snapshots = snaps
+                self.combined = combined
                 self.lastError = errors.isEmpty ? nil : errors.joined(separator: " / ")
                 self.lastRefresh = Date()
-                try? SnapshotIO.save(snap)
+                try? SnapshotIO.save(combined)
                 WidgetCenter.shared.reloadAllTimelines()
             }
         }

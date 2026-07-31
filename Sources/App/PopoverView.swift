@@ -3,10 +3,17 @@ import AppKit
 
 struct PopoverView: View {
     @ObservedObject var store: UsageStore
-    @AppStorage("menuBarMetric") private var metricKey = "session"
+    var connectionID: String? = nil          // nil → onboarding (no connections yet)
     @AppStorage("menuBarUnit") private var unitKey = "percent"
 
     private var unit: UnitKind { UnitKind(rawValue: unitKey) ?? .percent }
+
+    private var connection: AIConnection? {
+        store.connections.first { $0.id == connectionID } ?? store.connections.first
+    }
+    private var snapshot: UsageSnapshot? {
+        connection.flatMap { store.snapshots[$0.id] }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -14,10 +21,16 @@ struct PopoverView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    summaryCards
-                    modelSection
-                    heatmapSection
-                    settingsSection
+                    if connection == nil {
+                        onboarding
+                        connectSection
+                    } else {
+                        summaryCards
+                        modelSection
+                        heatmapSection
+                        settingsSection
+                        connectSection
+                    }
                     footer
                 }
                 .padding(14)
@@ -31,8 +44,12 @@ struct PopoverView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            ProviderIcon(kind: store.snapshot?.providerKind ?? .generic, size: 16)
-            Text("AI 사용량").font(.headline)
+            if let c = connection {
+                Circle().fill(c.color).frame(width: 9, height: 9)
+                Text("AI 노동청 · \(c.name)").font(.headline)
+            } else {
+                Text("AI 노동청").font(.headline)
+            }
             Spacer()
             if let t = store.lastRefresh {
                 Text(t, style: .time).font(.caption2).foregroundStyle(.secondary)
@@ -56,10 +73,23 @@ struct PopoverView: View {
         .padding(.vertical, 10)
     }
 
+    // MARK: Onboarding (no connections yet)
+
+    private var onboarding: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("내 AI가 노동착취를 얼마나 당했는지 확인할 수 있는 앱")
+                .font(.callout)
+            Text("아래에서 사용량을 집계할 AI를 연결하세요. 연결한 AI마다 메뉴바에 아이콘이 하나씩 생깁니다.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     // MARK: Summary cards
 
     private var summaryCards: some View {
-        let s = store.snapshot
+        let s = snapshot
+        let tint = connection?.color ?? .accentColor
         return VStack(spacing: 8) {
             HStack(spacing: 8) {
                 StatCard(title: "전체 사용량", cost: s?.totalCost, tokens: s?.totalTokens,
@@ -68,15 +98,18 @@ struct PopoverView: View {
             }
             HStack(spacing: 8) {
                 StatCard(title: "세션 사용량", cost: s?.sessionCost, tokens: s?.sessionTokens,
-                         sub: sessionSub, fraction: s.flatMap { $0.fraction(for: .session) })
+                         sub: sessionSub, fraction: s.flatMap { $0.fraction(for: .session) },
+                         tint: tint)
                 StatCard(title: "주간 사용량", cost: s?.weekCost, tokens: s?.weekTokens,
-                         sub: "최근 7일")
+                         sub: "최근 7일 · 전체 대비",
+                         fraction: s.flatMap { $0.totalCost > 0 ? $0.weekCost / $0.totalCost : nil },
+                         tint: tint)
             }
         }
     }
 
     private var sessionSub: String? {
-        guard let s = store.snapshot else { return nil }
+        guard let s = snapshot else { return nil }
         guard let end = s.sessionEnd, end > Date() else { return "활성 세션 없음" }
         let mins = Int(end.timeIntervalSinceNow / 60)
         return "종료까지 \(mins / 60)시간 \(mins % 60)분"
@@ -87,7 +120,7 @@ struct PopoverView: View {
     private var modelSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("모델별 사용량").font(.subheadline.bold())
-            if let models = store.snapshot?.models, !models.isEmpty {
+            if let models = snapshot?.models, !models.isEmpty {
                 let maxCost = models.map(\.cost).max() ?? 1
                 let maxTok = models.map(\.tokens).max() ?? 1
                 ForEach(models) { m in
@@ -114,7 +147,7 @@ struct PopoverView: View {
                 Text(unit == .tokens ? "일일 토큰 기준" : "일일 비용 기준")
                     .font(.caption2).foregroundStyle(.secondary)
             }
-            HeatmapView(dayMap: store.snapshot?.dayMap ?? [:],
+            HeatmapView(dayMap: snapshot?.dayMap ?? [:],
                         weeks: 24, cellSize: 10.5, spacing: 3,
                         unit: unit == .tokens ? .tokens : .cost)
         }
@@ -122,28 +155,81 @@ struct PopoverView: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
     }
 
-    // MARK: Settings
+    // MARK: Icon settings (per connection)
+
+    private var metricBinding: Binding<String> {
+        Binding(get: { connection?.metricKey ?? "session" },
+                set: { key in
+                    guard var c = connection else { return }
+                    c.metricKey = key
+                    store.updateConnection(c)
+                })
+    }
+
+    private var colorBinding: Binding<Color> {
+        Binding(get: { connection?.color ?? AIConnection.defaultColor },
+                set: { color in
+                    guard var c = connection else { return }
+                    c.colorHex = color.hexRGB
+                    store.updateConnection(c)
+                })
+    }
 
     private var settingsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("표시 설정").font(.subheadline.bold())
-            Picker("메뉴바 채움 기준", selection: $metricKey) {
+            Text("아이콘 설정").font(.subheadline.bold())
+            Picker("채움 기준", selection: metricBinding) {
                 Text("세션 사용량").tag("session")
-                Text("전체 사용량").tag("total")
                 Text("오늘 사용량").tag("today")
                 Text("주간 사용량").tag("week")
-                ForEach(store.snapshot?.models ?? []) { m in
-                    Text("\(m.name) 사용량").tag("model:\(m.id)")
-                }
             }
-            .pickerStyle(.menu)
-            Picker("단위", selection: $unitKey) {
+            .pickerStyle(.segmented)
+            ColorPicker("아이콘 색", selection: colorBinding, supportsOpacity: false)
+                .font(.caption)
+            Picker("단위 (모델별·히트맵 표시)", selection: $unitKey) {
                 ForEach(UnitKind.allCases, id: \.rawValue) { u in
                     Text(u.title).tag(u.rawValue)
                 }
             }
-            .pickerStyle(.segmented)
-            Text("메뉴바 아이콘은 선택한 지표의 사용률만큼 아래에서 위로 채워집니다. 사용률은 역대 최대 기록 대비 비율 — 세션: 최대 5시간 세션, 오늘: 최고 일간, 주간: 최고 7일, 모델: 전체 중 비중.")
+            .pickerStyle(.menu)
+            .font(.caption)
+            Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 사용률은 역대 최대 기록 대비 비율 — 세션: 최대 5시간 세션, 오늘: 최고 일간, 주간: 최고 7일.")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+    }
+
+    // MARK: Connections
+
+    private var connectSection: some View {
+        let unconnected = SourceKind.allCases.filter { s in
+            !store.connections.contains { $0.source == s }
+        }
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("AI 연결").font(.subheadline.bold())
+            ForEach(store.connections) { c in
+                HStack(spacing: 8) {
+                    Circle().fill(c.color).frame(width: 9, height: 9)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(c.name).font(.caption.bold())
+                        Text(c.source.detail).font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                    if c.id == connection?.id {
+                        Text("현재 보는 중").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Button("해제") { store.removeConnection(id: c.id) }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            ForEach(unconnected) { source in
+                ConnectRow(source: source, store: store)
+            }
+            Text("연결한 AI마다 메뉴바에 아이콘이 하나씩 생기고, 아이콘을 클릭하면 해당 AI의 통계와 설정이 열립니다.")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -158,9 +244,36 @@ struct PopoverView: View {
             if let err = store.lastError {
                 Text(err).font(.caption2).foregroundStyle(.red)
             }
-            Text("위젯: 데스크탑 우클릭 → '위젯 편집' 또는 알림 센터에서 'AI Usage' 위젯을 추가하세요.")
+            Text("위젯: 데스크탑 우클릭 → '위젯 편집' 또는 알림 센터에서 'AI 노동청' 위젯을 추가하세요.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Row offering an unconnected source; the color picked here becomes the
+/// connection's menu bar icon color (mint by default).
+private struct ConnectRow: View {
+    let source: SourceKind
+    let store: UsageStore
+    @State private var color: Color = AIConnection.defaultColor
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(source.defaultName).font(.caption.bold())
+                Text(source.detail).font(.caption2).foregroundStyle(.tertiary)
+            }
+            Spacer()
+            if source.isAvailable {
+                ColorPicker("", selection: $color, supportsOpacity: false)
+                    .labelsHidden()
+                    .help("메뉴바 아이콘 색")
+                Button("연결") { store.addConnection(source: source, color: color) }
+                    .font(.caption)
+            } else {
+                Text("감지되지 않음").font(.caption2).foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -173,6 +286,7 @@ private struct StatCard: View {
     let tokens: Int?
     let sub: String?
     var fraction: Double? = nil
+    var tint: Color = .accentColor
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
@@ -191,7 +305,7 @@ private struct StatCard: View {
             if let fraction {
                 Spacer(minLength: 0)
                 RingGauge(fraction: fraction, size: 34, lineWidth: 3.5,
-                          tint: .accentColor, showLabel: true)
+                          tint: tint, showLabel: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -224,4 +338,5 @@ private struct ModelRow: View {
             .frame(height: 5)
         }
     }
+
 }

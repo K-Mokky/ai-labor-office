@@ -1,13 +1,15 @@
-# AI Usage
+# AI 노동청
 
-Claude/GJC 사용량을 보여주는 macOS 메뉴바 앱 + WidgetKit 위젯. Xcode 프로젝트 없이 `swiftc`로 빌드합니다.
+내 AI가 노동착취를 얼마나 당했는지 확인할 수 있는 앱. Claude/GJC 사용량을 보여주는 macOS 메뉴바 앱 + WidgetKit 위젯이며, Xcode 프로젝트 없이 `swiftc`로 빌드합니다.
 
 ## 기능
 
-- **메뉴바**: 프로바이더 아이콘(Claude/GPT 자동 감지)만 표시. 선택한 지표(세션/전체/오늘/주간/모델별)의 사용률만큼 아이콘이 아래에서 위로 채워짐(100% = 완전히 채워진 아이콘)
-- **사용률(%) 기준**: 역대 최대 기록 대비 — 세션은 역대 최대 5시간 블록, 오늘은 최고 일간, 주간은 최고 7일, 모델은 전체 중 비중
-- **팝오버**: 요약 카드(세션 링 게이지 포함), 모델별 사용량 바, 깃허브 스타일 기여 히트맵, 표시 설정
-- **위젯 4종**: 기여 그래프(중/대), 요약(소/중), 모델별(소/중), 세션 링 게이지(소)
+- **AI 연결**: 첫 실행 시 연결 메뉴가 자동으로 열립니다. Claude Code·GJC 중 원하는 소스를 연결하고, 연결할 때 아이콘 색을 고를 수 있습니다(기본 민트). 연결 관리(추가/해제)는 팝오버의 "AI 연결" 섹션에 항상 있습니다.
+- **메뉴바**: 연결한 AI마다 아이콘이 하나씩 생깁니다. 각 아이콘은 프로바이더 글리프(Claude/GPT 자동 감지)가 해당 AI의 사용률만큼 아래에서 위로 채워지는 게이지입니다(100% = 완전히 채워진 아이콘).
+- **아이콘 설정**: 아이콘별로 채움 기준(세션/오늘/주간 사용량)과 색을 팝오버에서 변경할 수 있습니다.
+- **사용률(%) 기준**: 역대 최대 기록 대비 — 세션은 역대 최대 5시간 블록, 오늘은 최고 일간, 주간은 최고 7일
+- **팝오버**: 아이콘을 클릭하면 해당 AI의 통계가 열립니다 — 요약 카드(세션 링 게이지, 주간 카드는 전체 대비 % 링 포함), 모델별 사용량 바, 깃허브 스타일 기여 히트맵, 아이콘 설정, AI 연결 관리
+- **위젯 4종**: 기여 그래프(중/대), 요약(소/중), 모델별(소/중), 세션 링 게이지(소) — 연결된 모든 AI의 합산 기준
 
 ## 데이터 소스
 
@@ -21,18 +23,18 @@ Claude/GJC 사용량을 보여주는 macOS 메뉴바 앱 + WidgetKit 위젯. Xco
 ## 빌드 & 설치
 
 ```sh
-./build.sh          # build/AI Usage.app 생성 (ad-hoc 서명)
+./build.sh          # build/AI 노동청.app 생성 (ad-hoc 서명)
 ./build.sh install  # /Applications 에 설치 후 실행 + 위젯 등록 확인
-./build.sh dmg      # assets/AI-Usage-<버전>.dmg 생성 (배포용)
+./build.sh dmg      # assets/AI-노동청-<버전>.dmg 생성 (배포용)
 ```
 
 요구 사항: macOS 14+, arm64, Xcode Command Line Tools.
 
-위젯은 앱 첫 실행 후 데스크탑 우클릭 → **위젯 편집** 또는 알림 센터에서 "AI Usage"로 추가합니다.
+위젯은 앱 첫 실행 후 데스크탑 우클릭 → **위젯 편집** 또는 알림 센터에서 "AI 노동청"으로 추가합니다.
 
 ## 배포 (.dmg)
 
-`./build.sh dmg`가 `Resources/App-Info.plist`의 `CFBundleShortVersionString`을 읽어 `assets/AI-Usage-<버전>.dmg`를 만듭니다. DMG에는 앱과 `/Applications` 심링크가 들어 있어 드래그로 설치합니다.
+`./build.sh dmg`가 `Resources/App-Info.plist`의 `CFBundleShortVersionString`을 읽어 `assets/AI-노동청-<버전>.dmg`를 만듭니다. DMG에는 앱과 `/Applications` 심링크가 들어 있어 드래그로 설치합니다.
 
 버전 업데이트 절차:
 
@@ -47,9 +49,11 @@ Claude/GJC 사용량을 보여주는 macOS 메뉴바 앱 + WidgetKit 위젯. Xco
 ```
 Sources/
   Shared/   Models.swift(데이터 모델·포맷·스냅샷 IO), Heatmap.swift(히트맵 캔버스)
-  App/      AIUsageApp.swift(NSStatusItem+NSPopover), PopoverView.swift, UsageStore.swift(수집·집계)
+  App/      AIUsageApp.swift(NSStatusItem+NSPopover, 연결별 아이콘), Connections.swift(AI 연결 모델),
+            PopoverView.swift, UsageStore.swift(수집·집계)
   Widget/   Widgets.swift(위젯 번들 4종)
-Resources/  Info.plist 2종, widget.entitlements, AppIcon.icns(하늘색 스타버스트)
+Resources/  Info.plist 2종, widget.entitlements, AppIcon.icns(icon.png 기반)
 build.sh    swiftc 직접 빌드 + codesign + 설치/DMG 패키징
 assets/     배포용 버전별 DMG
+icon.png    앱 아이콘 원본
 ```

@@ -309,7 +309,7 @@ struct NoDataView: View {
         VStack(spacing: 6) {
             Image(systemName: "exclamationmark.chart.bar")
                 .font(.title3).foregroundStyle(.secondary)
-            Text("AI Usage 앱을 실행하면\n데이터가 표시됩니다")
+            Text("AI 노동청 앱을 실행하면\n데이터가 표시됩니다")
                 .font(.caption2).multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
         }
