@@ -1,6 +1,8 @@
 #!/bin/bash
 # Build AI Usage.app (menu bar app + WidgetKit extension) without Xcode.
-# Usage: ./build.sh [install]
+# Usage: ./build.sh [install|dmg]
+#   install  /Applications 에 설치 후 실행
+#   dmg      assets/AI-Usage-<버전>.dmg 생성 (버전은 Resources/App-Info.plist 기준)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -44,4 +46,18 @@ if [[ "${1:-}" == "install" ]]; then
   sleep 3
   pluginkit -m -p com.apple.widgetkit-extension | grep -i "com.mokky.aiusage.widget" \
     || echo "(위젯이 아직 등록되지 않았습니다. 잠시 후 'pluginkit -m -p com.apple.widgetkit-extension'으로 확인하세요.)"
+fi
+
+if [[ "${1:-}" == "dmg" ]]; then
+  VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/App-Info.plist)
+  ASSETS=assets
+  DMG="$ASSETS/AI-Usage-$VERSION.dmg"
+  mkdir -p "$ASSETS"
+  STAGE=$(mktemp -d)
+  cp -R "$APP" "$STAGE/"
+  ln -s /Applications "$STAGE/Applications"
+  rm -f "$DMG"
+  hdiutil create -volname "AI Usage $VERSION" -srcfolder "$STAGE" -format UDZO -ov "$DMG" >/dev/null
+  rm -rf "$STAGE"
+  echo "==> DMG: $DMG"
 fi

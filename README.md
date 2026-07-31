@@ -23,11 +23,24 @@ Claude/GJC 사용량을 보여주는 macOS 메뉴바 앱 + WidgetKit 위젯. Xco
 ```sh
 ./build.sh          # build/AI Usage.app 생성 (ad-hoc 서명)
 ./build.sh install  # /Applications 에 설치 후 실행 + 위젯 등록 확인
+./build.sh dmg      # assets/AI-Usage-<버전>.dmg 생성 (배포용)
 ```
 
 요구 사항: macOS 14+, arm64, Xcode Command Line Tools.
 
 위젯은 앱 첫 실행 후 데스크탑 우클릭 → **위젯 편집** 또는 알림 센터에서 "AI Usage"로 추가합니다.
+
+## 배포 (.dmg)
+
+`./build.sh dmg`가 `Resources/App-Info.plist`의 `CFBundleShortVersionString`을 읽어 `assets/AI-Usage-<버전>.dmg`를 만듭니다. DMG에는 앱과 `/Applications` 심링크가 들어 있어 드래그로 설치합니다.
+
+버전 업데이트 절차:
+
+1. `Resources/App-Info.plist`와 `Resources/Widget-Info.plist`의 `CFBundleShortVersionString`(필요시 `CFBundleVersion`)을 올린다.
+2. `./build.sh dmg` 실행 → `assets/`에 새 버전 파일이 추가된다 (기존 버전 파일은 그대로 유지).
+3. 커밋 후 푸시하면 GitHub에서 바로 내려받을 수 있다.
+
+> ad-hoc 서명이므로 다른 맥에서는 첫 실행 시 우클릭 → 열기(Gatekeeper 우회)가 필요합니다.
 
 ## 구조
 
@@ -37,5 +50,6 @@ Sources/
   App/      AIUsageApp.swift(MenuBarExtra), PopoverView.swift, UsageStore.swift(수집·집계)
   Widget/   Widgets.swift(위젯 번들 4종)
 Resources/  Info.plist 2종, widget.entitlements
-build.sh    swiftc 직접 빌드 + codesign + 설치
+build.sh    swiftc 직접 빌드 + codesign + 설치/DMG 패키징
+assets/     배포용 버전별 DMG
 ```
