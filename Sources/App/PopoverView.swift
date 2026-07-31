@@ -5,7 +5,6 @@ struct PopoverView: View {
     @ObservedObject var store: UsageStore
     @AppStorage("menuBarMetric") private var metricKey = "session"
     @AppStorage("menuBarUnit") private var unitKey = "percent"
-    @AppStorage("menuBarPrefix") private var showPrefix = true
 
     private var unit: UnitKind { UnitKind(rawValue: unitKey) ?? .percent }
 
@@ -127,8 +126,8 @@ struct PopoverView: View {
 
     private var settingsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("메뉴바 표시 설정").font(.subheadline.bold())
-            Picker("표시 정보", selection: $metricKey) {
+            Text("표시 설정").font(.subheadline.bold())
+            Picker("메뉴바 채움 기준", selection: $metricKey) {
                 Text("세션 사용량").tag("session")
                 Text("전체 사용량").tag("total")
                 Text("오늘 사용량").tag("today")
@@ -144,13 +143,9 @@ struct PopoverView: View {
                 }
             }
             .pickerStyle(.segmented)
-            if unit == .percent {
-                Text("사용률(%)은 역대 최대 기록 대비 비율입니다. 세션: 최대 5시간 세션, 오늘: 최고 일간, 주간: 최고 7일, 모델: 전체 중 비중.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Toggle("메뉴바에 항목 이름 표시 (예: \"세션 $3.42\" — 세션 사용률은 아이콘만 표시)", isOn: $showPrefix)
-                .font(.caption)
+            Text("메뉴바 아이콘은 선택한 지표의 사용률만큼 아래에서 위로 채워집니다. 사용률은 역대 최대 기록 대비 비율 — 세션: 최대 5시간 세션, 오늘: 최고 일간, 주간: 최고 7일, 모델: 전체 중 비중.")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
