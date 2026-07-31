@@ -49,7 +49,7 @@ Sources/
   Shared/   Models.swift(데이터 모델·포맷·스냅샷 IO), Heatmap.swift(히트맵 캔버스)
   App/      AIUsageApp.swift(MenuBarExtra), PopoverView.swift, UsageStore.swift(수집·집계)
   Widget/   Widgets.swift(위젯 번들 4종)
-Resources/  Info.plist 2종, widget.entitlements
+Resources/  Info.plist 2종, widget.entitlements, AppIcon.icns(하늘색 스타버스트)
 build.sh    swiftc 직접 빌드 + codesign + 설치/DMG 패키징
 assets/     배포용 버전별 DMG
 ```

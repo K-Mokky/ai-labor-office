@@ -26,6 +26,7 @@ swiftc -O -parse-as-library -application-extension -target "$TARGET" \
 
 cp Resources/App-Info.plist "$APP/Contents/Info.plist"
 cp Resources/Widget-Info.plist "$APPEX/Contents/Info.plist"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "==> Signing"
