@@ -101,18 +101,30 @@ struct PopoverView: View {
                          sub: sessionSub, fraction: s.flatMap { $0.fraction(for: .session) },
                          tint: tint)
                 StatCard(title: "주간 사용량", cost: s?.weekCost, tokens: s?.weekTokens,
-                         sub: "최근 7일 · 전체 대비",
-                         fraction: s.flatMap { $0.totalCost > 0 ? $0.weekCost / $0.totalCost : nil },
+                         sub: weekSub,
+                         fraction: s.flatMap { $0.fraction(for: .week) },
                          tint: tint)
             }
         }
     }
 
+    /// Prefers the provider's real 5h quota; falls back to the locally derived block.
     private var sessionSub: String? {
         guard let s = snapshot else { return nil }
+        if let w = s.limitWindow("5h") { return "5시간 한도 · \(resetText(w.resetsAt))" }
         guard let end = s.sessionEnd, end > Date() else { return "활성 세션 없음" }
-        let mins = Int(end.timeIntervalSinceNow / 60)
-        return "종료까지 \(mins / 60)시간 \(mins % 60)분"
+        return "종료까지 \(fmtRemaining(end))"
+    }
+
+    private var weekSub: String? {
+        guard let s = snapshot else { return nil }
+        if let w = s.limitWindow("7d") { return "7일 한도 · \(resetText(w.resetsAt))" }
+        return "최근 7일 · 역대 최고 대비"
+    }
+
+    private func resetText(_ date: Date?) -> String {
+        guard let date, date > Date() else { return "곧 초기화" }
+        return "\(fmtRemaining(date)) 후 초기화"
     }
 
     // MARK: Models
@@ -193,7 +205,7 @@ struct PopoverView: View {
             }
             .pickerStyle(.menu)
             .font(.caption)
-            Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 사용률은 역대 최대 기록 대비 비율 — 세션: 최대 5시간 세션, 오늘: 최고 일간, 주간: 최고 7일.")
+            Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 세션·주간은 Anthropic이 실제 적용하는 5시간·7일 한도 기준입니다(100% = 한도 소진). 한도를 읽지 못하면 역대 최대 기록 대비로 표시하고, 오늘은 항상 최고 일간 대비입니다.")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }

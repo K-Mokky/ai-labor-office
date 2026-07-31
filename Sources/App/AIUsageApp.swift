@@ -166,10 +166,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             let snap = store.snapshots[conn.id]
             var kind = snap?.providerKind ?? .generic
             if kind == .generic { kind = conn.source.fallbackProviderKind }
-            view = FilledProviderIcon(kind: kind,
-                                      fraction: snap.flatMap { $0.fraction(for: conn.metric) },
+            let fraction = snap.flatMap { $0.fraction(for: conn.metric) }
+            view = FilledProviderIcon(kind: kind, fraction: fraction,
                                       size: 18, color: conn.color)
-            button.toolTip = "\(conn.name) — \(conn.metric.title(in: snap))"
+            var tip = "\(conn.name) — \(conn.metric.title(in: snap))"
+            if let fraction { tip += " \(fmtPercent(fraction))" }
+            if let resets = quotaWindow(for: conn.metric, in: snap)?.resetsAt, resets > Date() {
+                tip += " · \(fmtRemaining(resets)) 후 초기화"
+            }
+            button.toolTip = tip
         } else {
             view = FilledProviderIcon(kind: .generic, fraction: nil,
                                       size: 18, color: AIConnection.defaultColor)
@@ -185,8 +190,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 }
 
-/// Provider glyph as a gauge: a dim track with a bright copy on top, masked to
-/// the bottom `fraction` of its height. `fraction == nil` shows only the track.
+/// The provider quota window backing a metric, when the provider reported one.
+private func quotaWindow(for metric: MetricKind, in snap: UsageSnapshot?) -> LimitWindow? {
+    switch metric {
+    case .session: return snap?.limitWindow("5h")
+    case .week: return snap?.limitWindow("7d")
+    default: return nil
+    }
+}
+
+/// How much of a glyph's ink sits below a given height.
+///
+/// The provider marks are radial, so their bottom edge is nearly empty: wiping a
+/// mask straight up to 28% height lit only 15% of the starburst's ink and looked
+/// no different from 7%. Mapping the fraction through the glyph's own ink
+/// distribution makes the lit share of the mark match the number it reports.
+@MainActor
+enum GlyphInkProfile {
+    private static let samples = 96
+    /// Per glyph: ink accumulated from the bottom row up, one entry per sample row.
+    private static var cache: [ProviderKind: [Double]] = [:]
+
+    /// Height (0…1 of the icon) at which the lit ink equals `fraction` of the total.
+    static func maskHeight(kind: ProviderKind, fraction: Double) -> CGFloat {
+        let f = min(max(fraction, 0), 1)
+        guard f > 0 else { return 0 }
+        guard f < 1 else { return 1 }
+        // Without a profile, degrade to the plain height wipe rather than hide the gauge.
+        guard let cumulative = profile(for: kind),
+              let total = cumulative.last, total > 0 else { return CGFloat(f) }
+
+        let target = f * total
+        guard let row = cumulative.firstIndex(where: { $0 >= target }) else { return CGFloat(f) }
+        let below = row == 0 ? 0 : cumulative[row - 1]
+        let span = cumulative[row] - below
+        let within = span > 0 ? (target - below) / span : 0
+        return CGFloat((Double(row) + within) / Double(samples))
+    }
+
+    private static func profile(for kind: ProviderKind) -> [Double]? {
+        if let cached = cache[kind] { return cached }
+
+        let renderer = ImageRenderer(content:
+            ProviderIcon(kind: kind, size: CGFloat(samples), color: .black).fixedSize())
+        renderer.scale = 1
+        guard let image = renderer.nsImage,
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
+
+        var inkFromBottom = [Double](repeating: 0, count: samples)
+        for y in 0..<min(bitmap.pixelsHigh, samples) {
+            var ink = 0.0
+            for x in 0..<bitmap.pixelsWide {
+                ink += Double(bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0)
+            }
+            inkFromBottom[samples - 1 - y] = ink   // bitmap row 0 is the top row
+        }
+
+        var cumulative: [Double] = []
+        cumulative.reserveCapacity(samples)
+        var running = 0.0
+        for ink in inkFromBottom {
+            running += ink
+            cumulative.append(running)
+        }
+        cache[kind] = cumulative
+        return cumulative
+    }
+}
+
+/// Provider glyph as a gauge: a dim track with a bright copy on top, masked so
+/// that `fraction` of the glyph's *ink* is lit. `fraction == nil` shows only the
+/// track.
 struct FilledProviderIcon: View {
     let kind: ProviderKind
     let fraction: Double?
@@ -196,12 +271,13 @@ struct FilledProviderIcon: View {
     var body: some View {
         ZStack {
             ProviderIcon(kind: kind, size: size, color: color)
-                .opacity(0.32)
-            if let f = fraction, f > 0 {
+                .opacity(0.28)
+            if let fraction, fraction > 0 {
+                let height = GlyphInkProfile.maskHeight(kind: kind, fraction: fraction)
                 ProviderIcon(kind: kind, size: size, color: color)
                     .mask(alignment: .bottom) {
                         Rectangle()
-                            .frame(width: size, height: size * min(f, 1))
+                            .frame(width: size, height: size * height)
                     }
             }
         }

@@ -73,11 +73,15 @@ final class UsageStore: ObservableObject {
             }
 
             let now = Date()
+            // Provider-enforced 5h/7d quotas; empty when unreadable.
+            let limits = RateLimitProbe.fetch()
             var snaps: [String: UsageSnapshot] = [:]
             for c in conns {
-                snaps[c.id] = Self.aggregate(events: bySource[c.source] ?? [], now: now)
+                snaps[c.id] = Self.aggregate(events: bySource[c.source] ?? [],
+                                             now: now, limits: limits)
             }
-            let combined = Self.aggregate(events: bySource.values.flatMap { $0 }, now: now)
+            let combined = Self.aggregate(events: bySource.values.flatMap { $0 },
+                                          now: now, limits: limits)
 
             DispatchQueue.main.async {
                 self.snapshots = snaps
@@ -102,7 +106,11 @@ final class UsageStore: ObservableObject {
     static func loadGJCStats() throws -> [UsageEvent] {
         let fm = FileManager.default
         let src = SnapshotIO.realHome + "/.gjc/stats.db"
-        guard fm.fileExists(atPath: src) else { return [] }
+        let sessionsRoot = SnapshotIO.realHome + "/.gjc/agent/sessions"
+        guard fm.fileExists(atPath: src) else {
+            // No stats.db yet — read usage straight from the session logs.
+            return loadGJCSessionEvents(root: sessionsRoot, offsets: [:])
+        }
 
         // Copy db (+wal/shm) to a temp dir so we never contend with the writer
         // and WAL reads work even without a live writer having set up the shm.
@@ -153,7 +161,80 @@ final class UsageStore: ObservableObject {
                 model: model, tokens: tokens, cost: cost, provider: provider
             ))
         }
-        return events
+        // stats.db is a cache that gjc refreshes only occasionally, so it can
+        // lag live usage by days. Parse whatever each session log appended past
+        // the recorded ingestion offset so today/week/session include current use.
+        var offsets: [String: UInt64] = [:]
+        var offStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT session_file, offset FROM file_offsets", -1, &offStmt, nil) == SQLITE_OK {
+            while sqlite3_step(offStmt) == SQLITE_ROW {
+                if let p = sqlite3_column_text(offStmt, 0) {
+                    offsets[String(cString: p)] = UInt64(sqlite3_column_int64(offStmt, 1))
+                }
+            }
+        }
+        sqlite3_finalize(offStmt)
+
+        return events + loadGJCSessionEvents(root: sessionsRoot, offsets: offsets)
+    }
+
+    /// Parses gjc session JSONL under `root`, skipping the byte prefix of each
+    /// file already ingested into stats.db (per its `file_offsets` table).
+    /// Offsets sit on line boundaries, so a tail read yields whole lines; a
+    /// half-written final line simply fails JSON parsing and is skipped.
+    static func loadGJCSessionEvents(root: String, offsets: [String: UInt64]) -> [UsageEvent] {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(atPath: root) else { return [] }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+
+        var byID: [String: UsageEvent] = [:]
+        var anonymous: [UsageEvent] = []
+
+        for case let rel as String in en where rel.hasSuffix(".jsonl") {
+            let path = root + "/" + rel
+            let start = offsets[path] ?? 0
+            guard let fh = FileHandle(forReadingAtPath: path) else { continue }
+            defer { try? fh.close() }
+            guard let end = try? fh.seekToEnd(), end > start else { continue }
+            try? fh.seek(toOffset: start)
+            guard let data = try? fh.readToEnd(),
+                  let text = String(data: data, encoding: .utf8) else { continue }
+
+            for line in text.split(separator: "\n") {
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      obj["type"] as? String == "message",
+                      let msg = obj["message"] as? [String: Any],
+                      msg["role"] as? String == "assistant",
+                      let model = msg["model"] as? String,
+                      let usage = msg["usage"] as? [String: Any],
+                      let tsStr = (obj["timestamp"] as? String) ?? (msg["timestamp"] as? String),
+                      let ts = iso.date(from: tsStr) ?? isoPlain.date(from: tsStr)
+                else { continue }
+
+                let input = usage["input"] as? Int ?? 0
+                let output = usage["output"] as? Int ?? 0
+                let cacheRead = usage["cacheRead"] as? Int ?? 0
+                let cacheWrite = usage["cacheWrite"] as? Int ?? 0
+                let tokens = usage["totalTokens"] as? Int
+                    ?? (input + output + cacheRead + cacheWrite)
+                guard tokens > 0 else { continue }
+
+                let cost = ((usage["cost"] as? [String: Any])?["total"] as? Double)
+                    ?? estimateCost(model: model, input: input, output: output,
+                                    cacheRead: cacheRead, cacheWrite: cacheWrite)
+                let ev = UsageEvent(ts: ts, model: model, tokens: tokens, cost: cost,
+                                    provider: msg["provider"] as? String ?? "")
+                if let id = obj["id"] as? String {
+                    byID[id] = ev
+                } else {
+                    anonymous.append(ev)
+                }
+            }
+        }
+        return Array(byID.values) + anonymous
     }
 
     // MARK: - Claude Code project JSONL
@@ -220,7 +301,8 @@ final class UsageStore: ObservableObject {
 
     // MARK: - Aggregation
 
-    static func aggregate(events: [UsageEvent], now: Date = Date()) -> UsageSnapshot {
+    static func aggregate(events: [UsageEvent], now: Date = Date(),
+                          limits: [LimitWindow] = []) -> UsageSnapshot {
         let cal = Calendar.current
         let todayKey = dayKeyFormatter.string(from: now)
         let weekStart = cal.date(byAdding: .day, value: -6, to: cal.startOfDay(for: now))!
@@ -292,6 +374,10 @@ final class UsageStore: ObservableObject {
 
         let provider = ProviderKind.detect(provider: sorted.last?.provider,
                                            model: sorted.last?.model)
+        // The 5h/7d quotas belong to the Anthropic account and are shared by
+        // every client billing to it, so they apply to any Claude-backed
+        // connection — but never to a GPT/generic one.
+        let quota = provider == .claude ? limits : []
 
         return UsageSnapshot(
             generatedAt: now,
@@ -302,6 +388,7 @@ final class UsageStore: ObservableObject {
             sessionStart: sessionStart, sessionEnd: sessionEnd,
             sessionMaxCost: sessionMaxCost, sessionMaxTokens: sessionMaxTokens,
             provider: provider.rawValue,
+            limits: quota.isEmpty ? nil : quota,
             models: models.values.sorted { $0.cost > $1.cost },
             days: days.values.sorted { $0.date < $1.date }
         )

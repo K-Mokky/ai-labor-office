@@ -17,6 +17,16 @@ struct ModelUsage: Codable, Identifiable, Hashable {
     var messages: Int
 }
 
+/// One provider-enforced quota window — Anthropic's rolling 5h / 7d limits.
+/// These percentages are metered by the provider and cannot be reproduced from
+/// local cost logs, so they are read from the provider rather than estimated.
+struct LimitWindow: Codable, Hashable, Identifiable {
+    var id: String              // "5h" | "7d"
+    var label: String           // "Claude 5 Hour"
+    var usedFraction: Double    // 0…1, where 1 == quota exhausted
+    var resetsAt: Date?
+}
+
 struct UsageSnapshot: Codable {
     var generatedAt: Date
 
@@ -39,6 +49,10 @@ struct UsageSnapshot: Codable {
     var sessionMaxTokens: Int?
 
     var provider: String?           // "claude" | "gpt" | "generic"
+
+    /// Provider-enforced quota windows. `nil` when they could not be read, in
+    /// which case percentages fall back to local history.
+    var limits: [LimitWindow]? = nil
 
     var models: [ModelUsage]
     var days: [DayUsage]
@@ -161,6 +175,14 @@ func fmtPercent(_ f: Double) -> String {
     String(format: "%.0f%%", f * 100)
 }
 
+/// Time left until `date`, coarsened for glanceable UI: "1일 13시간", "3시간 24분", "12분".
+func fmtRemaining(_ date: Date) -> String {
+    let mins = max(0, Int(date.timeIntervalSinceNow / 60))
+    if mins >= 1440 { return "\(mins / 1440)일 \((mins % 1440) / 60)시간" }
+    if mins >= 60 { return "\(mins / 60)시간 \(mins % 60)분" }
+    return "\(mins)분"
+}
+
 func prettyModelName(_ id: String) -> String {
     // "claude-fable-5" -> "Fable 5", "claude-opus-4-8" -> "Opus 4.8"
     var parts = id.split(separator: "-").map(String.init)
@@ -196,17 +218,28 @@ extension UsageSnapshot {
         return best
     }
 
-    /// Usage fraction shown by the percent unit. 1.0 = matches the historical max.
+    /// The provider-enforced window with `id` ("5h" / "7d"), when it was readable.
+    func limitWindow(_ id: String) -> LimitWindow? {
+        limits?.first { $0.id == id }
+    }
+
+    /// Usage fraction shown by the percent unit.
+    ///
+    /// Session and week report the provider's real quota, so 1.0 means the
+    /// quota is spent. Only when that is unavailable do they fall back to local
+    /// history, where 1.0 merely matches the heaviest stretch on record.
     /// nil when there is no baseline to compare against.
     func fraction(for metric: MetricKind) -> Double? {
         switch metric {
         case .session:
+            if let w = limitWindow("5h") { return w.usedFraction }
             guard let m = sessionMaxCost, m > 0 else { return nil }
             return sessionCost / m
         case .today:
             let m = maxDayCost
             return m > 0 ? todayCost / m : nil
         case .week:
+            if let w = limitWindow("7d") { return w.usedFraction }
             let m = maxWeekCost
             return m > 0 ? weekCost / m : nil
         case .total:
