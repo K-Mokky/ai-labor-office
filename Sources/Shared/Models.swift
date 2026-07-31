@@ -1,0 +1,296 @@
+import Foundation
+
+// MARK: - Core data types (shared between app and widget)
+
+struct DayUsage: Codable, Hashable {
+    var date: String        // "yyyy-MM-dd" in local time zone
+    var cost: Double
+    var tokens: Int
+    var messages: Int
+}
+
+struct ModelUsage: Codable, Identifiable, Hashable {
+    var id: String          // raw model id, e.g. "claude-fable-5"
+    var name: String        // pretty name, e.g. "Fable 5"
+    var cost: Double
+    var tokens: Int
+    var messages: Int
+}
+
+struct UsageSnapshot: Codable {
+    var generatedAt: Date
+
+    var totalCost: Double
+    var totalTokens: Int
+    var totalMessages: Int
+
+    var todayCost: Double
+    var todayTokens: Int
+
+    var weekCost: Double
+    var weekTokens: Int
+
+    var sessionCost: Double
+    var sessionTokens: Int
+    var sessionStart: Date?
+    var sessionEnd: Date?
+
+    var sessionMaxCost: Double?     // historical max 5h-block (percent baseline)
+    var sessionMaxTokens: Int?
+
+    var provider: String?           // "claude" | "gpt" | "generic"
+
+    var models: [ModelUsage]
+    var days: [DayUsage]
+
+    var dayMap: [String: DayUsage] {
+        Dictionary(uniqueKeysWithValues: days.map { ($0.date, $0) })
+    }
+}
+
+// MARK: - Display metric selection
+
+enum UnitKind: String, CaseIterable {
+    case percent
+    case cost
+    case tokens
+
+    var title: String {
+        switch self {
+        case .percent: return "사용률(%)"
+        case .cost: return "비용($)"
+        case .tokens: return "토큰"
+        }
+    }
+}
+
+enum MetricKind: Hashable {
+    case total
+    case today
+    case week
+    case session
+    case model(String)
+
+    var key: String {
+        switch self {
+        case .total: return "total"
+        case .today: return "today"
+        case .week: return "week"
+        case .session: return "session"
+        case .model(let id): return "model:\(id)"
+        }
+    }
+
+    static func from(key: String) -> MetricKind {
+        if key.hasPrefix("model:") { return .model(String(key.dropFirst(6))) }
+        switch key {
+        case "total": return .total
+        case "today": return .today
+        case "week": return .week
+        default: return .session
+        }
+    }
+
+    func title(in snapshot: UsageSnapshot?) -> String {
+        switch self {
+        case .total: return "전체 사용량"
+        case .today: return "오늘 사용량"
+        case .week: return "주간 사용량"
+        case .session: return "세션 사용량"
+        case .model(let id):
+            let name = snapshot?.models.first(where: { $0.id == id })?.name ?? id
+            return "\(name) 사용량"
+        }
+    }
+
+    /// Short prefix used in the menu bar label.
+    func shortPrefix(in snapshot: UsageSnapshot?) -> String {
+        switch self {
+        case .total: return "전체"
+        case .today: return "오늘"
+        case .week: return "주간"
+        case .session: return "세션"
+        case .model(let id):
+            let name = snapshot?.models.first(where: { $0.id == id })?.name ?? id
+            return name.components(separatedBy: " ").first ?? name
+        }
+    }
+
+    func value(in snapshot: UsageSnapshot?, unit: UnitKind) -> String {
+        guard let s = snapshot else { return "—" }
+        if unit == .percent {
+            return s.fraction(for: self).map(fmtPercent) ?? "—"
+        }
+        let (cost, tokens): (Double, Int)
+        switch self {
+        case .total: (cost, tokens) = (s.totalCost, s.totalTokens)
+        case .today: (cost, tokens) = (s.todayCost, s.todayTokens)
+        case .week: (cost, tokens) = (s.weekCost, s.weekTokens)
+        case .session: (cost, tokens) = (s.sessionCost, s.sessionTokens)
+        case .model(let id):
+            let m = s.models.first(where: { $0.id == id })
+            (cost, tokens) = (m?.cost ?? 0, m?.tokens ?? 0)
+        }
+        switch unit {
+        case .percent: return "—" // handled above
+        case .cost: return fmtCost(cost)
+        case .tokens: return fmtTokens(tokens)
+        }
+    }
+}
+
+// MARK: - Formatting
+
+func fmtCost(_ v: Double) -> String {
+    if v >= 10_000 { return String(format: "$%.1fk", v / 1000) }
+    if v >= 1000 { return String(format: "$%.2fk", v / 1000) }
+    if v >= 100 { return String(format: "$%.0f", v) }
+    if v >= 10 { return String(format: "$%.1f", v) }
+    return String(format: "$%.2f", v)
+}
+
+func fmtTokens(_ n: Int) -> String {
+    let v = Double(n)
+    if v >= 1_000_000_000 { return String(format: "%.2fB", v / 1_000_000_000) }
+    if v >= 1_000_000 { return String(format: "%.1fM", v / 1_000_000) }
+    if v >= 1_000 { return String(format: "%.1fK", v / 1_000) }
+    return "\(n)"
+}
+
+func fmtPercent(_ f: Double) -> String {
+    String(format: "%.0f%%", f * 100)
+}
+
+func prettyModelName(_ id: String) -> String {
+    // "claude-fable-5" -> "Fable 5", "claude-opus-4-8" -> "Opus 4.8"
+    var parts = id.split(separator: "-").map(String.init)
+    if parts.first?.lowercased() == "claude" { parts.removeFirst() }
+    guard !parts.isEmpty else { return id }
+    let family = parts[0].prefix(1).uppercased() + parts[0].dropFirst()
+    let nums = parts.dropFirst().filter { Int($0) != nil }
+    if nums.isEmpty { return family }
+    return "\(family) \(nums.joined(separator: "."))"
+}
+
+// MARK: - Percent (usage vs historical max) & provider
+
+extension UsageSnapshot {
+    var providerKind: ProviderKind { ProviderKind(rawValue: provider ?? "") ?? .generic }
+
+    var maxDayCost: Double { days.map(\.cost).max() ?? 0 }
+
+    /// Max cost over any rolling 7-day window in history.
+    var maxWeekCost: Double {
+        let pts = days.compactMap { d in dayKeyFormatter.date(from: d.date).map { ($0, d.cost) } }
+            .sorted { $0.0 < $1.0 }
+        var best = 0.0, sum = 0.0
+        var j = 0
+        for i in 0..<pts.count {
+            sum += pts[i].1
+            while pts[i].0.timeIntervalSince(pts[j].0) > 6.5 * 86400 {
+                sum -= pts[j].1
+                j += 1
+            }
+            best = Swift.max(best, sum)
+        }
+        return best
+    }
+
+    /// Usage fraction shown by the percent unit. 1.0 = matches the historical max.
+    /// nil when there is no baseline to compare against.
+    func fraction(for metric: MetricKind) -> Double? {
+        switch metric {
+        case .session:
+            guard let m = sessionMaxCost, m > 0 else { return nil }
+            return sessionCost / m
+        case .today:
+            let m = maxDayCost
+            return m > 0 ? todayCost / m : nil
+        case .week:
+            let m = maxWeekCost
+            return m > 0 ? weekCost / m : nil
+        case .total:
+            return nil
+        case .model(let id):
+            guard totalCost > 0, let mu = models.first(where: { $0.id == id }) else { return nil }
+            return mu.cost / totalCost
+        }
+    }
+}
+
+let dayKeyFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd"
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.timeZone = .current
+    return f
+}()
+
+// MARK: - Snapshot IO (app writes, widget reads)
+
+enum SnapshotIO {
+    /// Real user home, even inside a sandboxed extension container.
+    static var realHome: String {
+        if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
+            return String(cString: dir)
+        }
+        return NSHomeDirectory()
+    }
+
+    static var directory: URL {
+        URL(fileURLWithPath: realHome)
+            .appendingPathComponent("Library/Application Support/AIUsage", isDirectory: true)
+    }
+
+    static var fileURL: URL { directory.appendingPathComponent("snapshot.json") }
+
+    static func save(_ snapshot: UsageSnapshot) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        enc.outputFormatting = [.sortedKeys]
+        let data = try enc.encode(snapshot)
+        try data.write(to: fileURL, options: .atomic)
+    }
+
+    static func load() -> UsageSnapshot? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        return try? dec.decode(UsageSnapshot.self, from: data)
+    }
+}
+
+// MARK: - Placeholder (widget gallery preview)
+
+extension UsageSnapshot {
+    static var placeholder: UsageSnapshot {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        var days: [DayUsage] = []
+        for i in 0..<180 {
+            guard let d = cal.date(byAdding: .day, value: -i, to: today) else { continue }
+            let seed = (i * 37 + 11) % 17
+            let cost = seed < 5 ? 0 : Double(seed) * 1.7
+            days.append(DayUsage(date: dayKeyFormatter.string(from: d),
+                                 cost: cost, tokens: Int(cost * 90_000), messages: seed))
+        }
+        return UsageSnapshot(
+            generatedAt: Date(),
+            totalCost: 698.68, totalTokens: 434_490_000, totalMessages: 4444,
+            todayCost: 12.34, todayTokens: 8_400_000,
+            weekCost: 88.20, weekTokens: 61_000_000,
+            sessionCost: 3.42, sessionTokens: 2_100_000,
+            sessionStart: Date().addingTimeInterval(-3600),
+            sessionEnd: Date().addingTimeInterval(4 * 3600),
+            sessionMaxCost: 8.0, sessionMaxTokens: 5_000_000,
+            provider: "claude",
+            models: [
+                ModelUsage(id: "claude-fable-5", name: "Fable 5", cost: 518.21, tokens: 251_930_000, messages: 1871),
+                ModelUsage(id: "claude-opus-4-8", name: "Opus 4.8", cost: 178.77, tokens: 174_640_000, messages: 2402),
+                ModelUsage(id: "claude-sonnet-5", name: "Sonnet 5", cost: 1.70, tokens: 3_100_000, messages: 36),
+            ],
+            days: days.reversed()
+        )
+    }
+}
