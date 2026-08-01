@@ -8,12 +8,14 @@ import SQLite3
 /// to disk. Estimating them from local history is what made the menu bar report
 /// 30% of "biggest session ever" while the real 5h window sat at 96% used.
 ///
-/// gjc already fetches the authoritative report from `/api/oauth/usage` and
-/// keeps both the OAuth token and the last response in `~/.gjc/agent/agent.db`.
-/// This reads that database read-only: the cached report is used as-is, and when
-/// the stored access token is still valid the report is refreshed with a plain
-/// GET. Nothing is ever written back and the refresh token is never exercised,
-/// so gjc's own login is left untouched.
+/// The report comes from `/api/oauth/usage`, authenticated with the first
+/// working access token among: the app's own linked account (refreshable
+/// without any CLI — see `AccountTokenStore`), gjc's token in
+/// `~/.gjc/agent/agent.db`, and Claude Code's token (Keychain item
+/// "Claude Code-credentials" or `~/.claude/.credentials.json`). CLI stores are
+/// only ever read: their refresh tokens rotate on use, so exercising one here
+/// could break the CLI's own login. When every token is dead, gjc's cached
+/// report is used and stamped with its fetch time so the UI can show staleness.
 enum RateLimitProbe {
     private static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private static let betaHeader = "oauth-2025-04-20"
@@ -33,17 +35,67 @@ enum RateLimitProbe {
 
     /// Empty when the report is unreadable; callers then keep their local fallback.
     static func fetch() -> [LimitWindow] {
-        guard let db = openAgentDBCopy() else { return [] }
+        let db = openAgentDBCopy()
         defer {
-            sqlite3_close(db.handle)
-            try? FileManager.default.removeItem(at: db.tmp)
+            if let db {
+                sqlite3_close(db.handle)
+                try? FileManager.default.removeItem(at: db.tmp)
+            }
         }
-        // gjc only refreshes its cache while it is running, so a live read wins
-        // when the token allows one. The cache is the offline fallback.
-        if let token = validToken(db.handle), let live = fetchLive(token: token) {
-            return live
+
+        // Candidate tokens, most durable first; the first one the API accepts wins.
+        var tokens: [String] = []
+        if let t = AccountTokenStore.validAccessToken() { tokens.append(t) }  // linked account
+        if let db, let t = validToken(db.handle) { tokens.append(t) }         // gjc CLI
+        if let t = claudeCodeToken() { tokens.append(t) }                     // Claude Code CLI
+        for token in tokens {
+            if let live = fetchLive(token: token) { return live }
         }
-        return cachedWindows(db.handle)
+        // Every token is dead → gjc's cached report, stamped so the UI can
+        // say how old the numbers are instead of presenting them as live.
+        return db.map { cachedWindows($0.handle) } ?? []
+    }
+
+    // MARK: - Claude Code credentials (read-only)
+
+    /// Claude Code's own access token, when still valid. macOS default storage
+    /// is the Keychain; `~/.claude/.credentials.json` is the file fallback.
+    /// Read via the `security` CLI, which created the item and therefore sits
+    /// in its ACL — no permission prompt, and nothing is ever written back.
+    private static func claudeCodeToken() -> String? {
+        for raw in [keychainClaudeCreds(), fileClaudeCreds()] {
+            guard let raw,
+                  let obj = try? JSONSerialization
+                      .jsonObject(with: Data(raw.utf8)) as? [String: Any],
+                  let oauth = obj["claudeAiOauth"] as? [String: Any],
+                  let token = oauth["accessToken"] as? String,
+                  let expires = oauth["expiresAt"] as? Double,
+                  Date(timeIntervalSince1970: expires / 1000).timeIntervalSinceNow > 60
+            else { continue }
+            return token
+        }
+        return nil
+    }
+
+    private static func keychainClaudeCreds() -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func fileClaudeCreds() -> String? {
+        let path = SnapshotIO.realHome + "/.claude/.credentials.json"
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: - agent.db
@@ -101,8 +153,13 @@ enum RateLimitProbe {
                   let entries = value["limits"] as? [[String: Any]]
             else { continue }
 
-            let windows = entries.compactMap(window(fromCache:))
             let fetchedAt = value["fetchedAt"] as? Double ?? 0
+            let asOf = fetchedAt > 0 ? Date(timeIntervalSince1970: fetchedAt / 1000) : nil
+            let windows = entries.compactMap(window(fromCache:)).map { w in
+                var w = w
+                w.asOf = asOf
+                return w
+            }
             if !windows.isEmpty, fetchedAt >= (newest?.fetchedAt ?? -1) {
                 newest = (fetchedAt, windows)
             }

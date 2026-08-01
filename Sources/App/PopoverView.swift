@@ -1,5 +1,16 @@
 import SwiftUI
 import AppKit
+import WidgetKit
+
+/// Persists per-widget settings and pokes WidgetKit when they change.
+final class WidgetSettingsStore: ObservableObject {
+    @Published var configs: WidgetConfigs = SnapshotIO.loadWidgetConfigs() {
+        didSet {
+            SnapshotIO.saveWidgetConfigs(configs)
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+    }
+}
 
 struct PopoverView: View {
     @ObservedObject var store: UsageStore
@@ -8,6 +19,12 @@ struct PopoverView: View {
     @AppStorage("menuBarUnit") private var unitKey = "percent"
     @AppStorage("autoUpdate") private var autoUpdate = true
     @State private var showSettings = false
+    @StateObject private var widgetSettings = WidgetSettingsStore()
+    @ObservedObject private var account = AccountAuth.shared
+    @State private var loginStarted = false
+    @State private var loginCode = ""
+    @State private var loginBusy = false
+    @State private var loginError: String?
 
     private var unit: UnitKind { UnitKind(rawValue: unitKey) ?? .percent }
 
@@ -34,6 +51,8 @@ struct PopoverView: View {
                         heatmapSection
                         if showSettings {
                             settingsSection
+                            widgetSection
+                            accountSection
                             connectSection
                         }
                     }
@@ -174,15 +193,25 @@ struct PopoverView: View {
     /// Prefers the provider's real 5h quota; falls back to the locally derived block.
     private var sessionSub: String? {
         guard let s = snapshot else { return nil }
-        if let w = s.limitWindow("5h") { return "5시간 한도 · \(resetText(w.resetsAt))" }
+        if let w = s.limitWindow("5h") {
+            return "5시간 한도 · \(resetText(w.resetsAt))\(staleSuffix(w))"
+        }
         guard let end = s.sessionEnd, end > Date() else { return "활성 세션 없음" }
         return "종료까지 \(fmtRemaining(end))"
     }
 
     private var weekSub: String? {
         guard let s = snapshot else { return nil }
-        if let w = s.limitWindow("7d") { return "7일 한도 · \(resetText(w.resetsAt))" }
+        if let w = s.limitWindow("7d") {
+            return "7일 한도 · \(resetText(w.resetsAt))\(staleSuffix(w))"
+        }
         return "최근 7일 · 역대 최고 대비"
+    }
+
+    /// " · N시간 전 기준" when the window came from a stale cached report.
+    private func staleSuffix(_ w: LimitWindow) -> String {
+        guard let asOf = w.asOf, Date().timeIntervalSince(asOf) > 15 * 60 else { return "" }
+        return " · \(fmtAgo(asOf)) 기준"
     }
 
     private func resetText(_ date: Date?) -> String {
@@ -290,6 +319,133 @@ struct PopoverView: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+    }
+
+    // MARK: Widget settings
+
+    private var widgetSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("위젯 설정").font(.subheadline.bold())
+            widgetRow("기여 그래프", kind: "contribution")
+            widgetRow("요약", kind: "summary")
+            widgetRow("모델별", kind: "models")
+            widgetRow("세션", kind: "session")
+            Text("위젯마다 어떤 AI의 데이터를 어떤 단위로 보여줄지 고릅니다. 변경 즉시 위젯에 반영됩니다.")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+    }
+
+    private func widgetRow(_ title: String, kind: String) -> some View {
+        let sourceBinding = Binding<String>(
+            get: { widgetSettings.configs.config(for: kind).source },
+            set: { v in
+                var c = widgetSettings.configs.config(for: kind)
+                c.source = v
+                widgetSettings.configs.set(c, for: kind)
+            })
+        let unitBinding = Binding<String>(
+            get: { widgetSettings.configs.config(for: kind).unit },
+            set: { v in
+                var c = widgetSettings.configs.config(for: kind)
+                c.unit = v
+                widgetSettings.configs.set(c, for: kind)
+            })
+        return HStack(spacing: 6) {
+            Text(title).font(.caption).frame(width: 72, alignment: .leading)
+            Picker("", selection: sourceBinding) {
+                Text("전체 합산").tag("all")
+                ForEach(store.connections) { c in
+                    Text(c.name).tag(c.source.rawValue)
+                }
+            }
+            .labelsHidden()
+            .controlSize(.small)
+            Picker("", selection: unitBinding) {
+                Text("비용($)").tag("cost")
+                Text("토큰").tag("tokens")
+            }
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(width: 92)
+        }
+    }
+
+    // MARK: Account link (CLI-independent quota refresh)
+
+    private var accountSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("한도 계정 연결").font(.subheadline.bold())
+            if account.isConnected {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                    Text("Claude 계정 연결됨 — CLI를 열지 않아도 5시간·7일 한도가 계속 갱신됩니다.")
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("해제") {
+                        account.disconnect()
+                        store.refresh()
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .buttonStyle(.borderless)
+                }
+            } else {
+                Text("5시간·7일 한도는 CLI(gjc·Claude Code)가 남긴 토큰이 살아 있는 동안만 실시간으로 읽힙니다. 계정을 직접 연결하면 CLI를 열지 않아도 항상 갱신됩니다.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button(loginStarted ? "브라우저 다시 열기" : "브라우저에서 로그인") {
+                        loginError = nil
+                        account.beginLogin()
+                        loginStarted = true
+                    }
+                    .font(.caption)
+                    if loginStarted {
+                        TextField("코드 붙여넣기 (code#state)", text: $loginCode)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                        if loginBusy {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("연결") { completeLogin() }
+                                .font(.caption)
+                                .disabled(loginCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+                }
+                if loginStarted {
+                    Text("브라우저 로그인 후 표시되는 코드를 붙여넣고 '연결'을 누르세요.")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                if let e = loginError {
+                    Text(e).font(.caption2).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+    }
+
+    private func completeLogin() {
+        loginBusy = true
+        loginError = nil
+        let code = loginCode
+        Task {
+            do {
+                try await account.complete(code: code)
+                loginCode = ""
+                loginStarted = false
+                store.refresh()   // pull the live 5h/7d report right away
+            } catch {
+                loginError = error.localizedDescription
+            }
+            loginBusy = false
+        }
     }
 
     // MARK: Connections

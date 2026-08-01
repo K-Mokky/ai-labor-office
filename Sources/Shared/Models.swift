@@ -25,6 +25,9 @@ struct LimitWindow: Codable, Hashable, Identifiable {
     var label: String           // "Claude 5 Hour"
     var usedFraction: Double    // 0…1, where 1 == quota exhausted
     var resetsAt: Date?
+    /// When the report backing this window was fetched. `nil` == live fetch;
+    /// an old date means the value is a stale cache fallback.
+    var asOf: Date? = nil
 }
 
 struct UsageSnapshot: Codable {
@@ -182,6 +185,14 @@ func fmtRemaining(_ date: Date) -> String {
     if mins >= 60 { return "\(mins / 60)시간 \(mins % 60)분" }
     return "\(mins)분"
 }
+/// How long ago `date` was, coarsened: "방금", "5분 전", "3시간 전", "2일 전".
+func fmtAgo(_ date: Date) -> String {
+    let mins = max(0, Int(Date().timeIntervalSince(date) / 60))
+    if mins < 1 { return "방금" }
+    if mins < 60 { return "\(mins)분 전" }
+    if mins < 1440 { return "\(mins / 60)시간 전" }
+    return "\(mins / 1440)일 전"
+}
 
 func prettyModelName(_ id: String) -> String {
     // "claude-fable-5" -> "Fable 5", "claude-opus-4-8" -> "Opus 4.8"
@@ -291,6 +302,119 @@ enum SnapshotIO {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         return try? dec.decode(UsageSnapshot.self, from: data)
+    }
+}
+
+// MARK: - Widget configuration & payload (app writes, widget reads)
+
+/// Per-widget display settings, configured from the app's popover.
+/// (AppIntents-based in-widget editing needs Xcode's metadata processor, which
+/// this swiftc-only build doesn't have — so widgets are configured in the app.)
+struct WidgetConfig: Codable, Equatable {
+    /// "all" for every connection combined, or a `SourceKind` rawValue.
+    var source: String
+    /// "cost" | "tokens" — the primary number widgets display.
+    var unit: String
+
+    init(source: String = "all", unit: String = "cost") {
+        self.source = source
+        self.unit = unit
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try? decoder.container(keyedBy: CodingKeys.self)
+        source = (try? c?.decode(String.self, forKey: .source)) ?? "all"
+        unit = (try? c?.decode(String.self, forKey: .unit)) ?? "cost"
+    }
+
+    var unitKind: UnitKind { unit == "tokens" ? .tokens : .cost }
+}
+
+/// Settings for the four widget kinds, persisted as one JSON file.
+struct WidgetConfigs: Codable, Equatable {
+    var contribution = WidgetConfig()
+    var summary = WidgetConfig()
+    var models = WidgetConfig()
+    var session = WidgetConfig()
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try? decoder.container(keyedBy: CodingKeys.self)
+        contribution = (try? c?.decode(WidgetConfig.self, forKey: .contribution)) ?? WidgetConfig()
+        summary = (try? c?.decode(WidgetConfig.self, forKey: .summary)) ?? WidgetConfig()
+        models = (try? c?.decode(WidgetConfig.self, forKey: .models)) ?? WidgetConfig()
+        session = (try? c?.decode(WidgetConfig.self, forKey: .session)) ?? WidgetConfig()
+    }
+
+    func config(for kind: String) -> WidgetConfig {
+        switch kind {
+        case "contribution": return contribution
+        case "summary": return summary
+        case "models": return models
+        case "session": return session
+        default: return WidgetConfig()
+        }
+    }
+
+    mutating func set(_ config: WidgetConfig, for kind: String) {
+        switch kind {
+        case "contribution": contribution = config
+        case "summary": summary = config
+        case "models": models = config
+        case "session": session = config
+        default: break
+        }
+    }
+}
+
+/// Everything widgets can render: the combined snapshot plus one per source.
+struct WidgetPayload: Codable {
+    var combined: UsageSnapshot?
+    var sources: [String: UsageSnapshot] = [:]  // SourceKind rawValue → snapshot
+    var names: [String: String] = [:]           // SourceKind rawValue → display name
+
+    func snapshot(for config: WidgetConfig) -> UsageSnapshot? {
+        config.source == "all" ? combined : (sources[config.source] ?? combined)
+    }
+
+    /// Display name of the selected source; nil for the combined view.
+    func name(for config: WidgetConfig) -> String? {
+        config.source == "all" ? nil : names[config.source]
+    }
+}
+
+extension SnapshotIO {
+    static var payloadURL: URL { directory.appendingPathComponent("widget-data.json") }
+    static var widgetConfigURL: URL { directory.appendingPathComponent("widget-config.json") }
+
+    static func savePayload(_ payload: WidgetPayload) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        enc.outputFormatting = [.sortedKeys]
+        try enc.encode(payload).write(to: payloadURL, options: .atomic)
+    }
+
+    static func loadPayload() -> WidgetPayload? {
+        guard let data = try? Data(contentsOf: payloadURL) else { return nil }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        return try? dec.decode(WidgetPayload.self, from: data)
+    }
+
+    static func saveWidgetConfigs(_ configs: WidgetConfigs) {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(configs) {
+            try? data.write(to: widgetConfigURL, options: .atomic)
+        }
+    }
+
+    static func loadWidgetConfigs() -> WidgetConfigs {
+        guard let data = try? Data(contentsOf: widgetConfigURL),
+              let configs = try? JSONDecoder().decode(WidgetConfigs.self, from: data)
+        else { return WidgetConfigs() }
+        return configs
     }
 }
 

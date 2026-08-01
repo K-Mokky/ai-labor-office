@@ -9,7 +9,9 @@
 - **아이콘 설정**: 아이콘별로 채움 기준(세션/오늘/주간 사용량)과 색을 팝오버에서 변경할 수 있습니다.
 - **사용률(%) 기준**: 세션·주간은 **Anthropic이 실제 적용하는 5시간·7일 한도**(100% = 한도 소진)를 그대로 씁니다. 한도를 읽지 못할 때만 역대 최대 기록 대비로 되돌아가고, 오늘은 항상 최고 일간 대비입니다.
 - **팝오버**: 아이콘을 클릭하면 해당 AI의 통계가 열립니다 — 요약 카드(세션·주간 링 게이지에 한도 소진율과 초기화까지 남은 시간), 모델별 사용량 바, 깃허브 스타일 기여 히트맵, 아이콘 설정, AI 연결 관리
-- **위젯 4종**: 기여 그래프(중/대), 요약(소/중), 모델별(소/중), 세션 링 게이지(소) — 연결된 모든 AI의 합산 기준
+- **위젯 4종**: 기여 그래프(중/대), 요약(소/중), 모델별(소/중), 세션 링 게이지(소)
+- **위젯 설정**: 팝오버 설정의 "위젯 설정"에서 위젯마다 데이터 소스(전체 합산/개별 AI)와 단위(비용/토큰)를 고를 수 있습니다. swiftc 단독 빌드에는 Xcode의 AppIntents 메타데이터 프로세서가 없어 위젯 자체 편집 UI 대신 앱에서 설정합니다.
+- **한도 계정 연결**: CLI가 남긴 토큰은 몇 시간이면 만료되어, CLI를 다시 열기 전까지 5h/7d 한도가 갱신되지 않습니다. 팝오버 설정의 "한도 계정 연결"로 Claude 계정을 직접 연결(OAuth+PKCE)하면 앱이 자체 토큰을 보유·갱신하므로 CLI 없이도 한도가 계속 갱신됩니다.
 
 ## 데이터 소스
 
@@ -17,11 +19,11 @@
 |---|---|---|
 | GJC | `~/.gjc/stats.db` | SQLite `messages` 테이블 (임시 복사 후 읽기) |
 | Claude Code | `~/.claude/projects/**/*.jsonl` | assistant 메시지 usage 파싱, `costUSD` 없으면 공개 단가로 추정 |
-| 실제 한도(5h/7d) | `~/.gjc/agent/agent.db` | `cache`에 캐시된 `/api/oauth/usage` 리포트를 읽고, 저장된 액세스 토큰이 아직 유효하면 같은 엔드포인트를 GET으로 갱신 (읽기 전용 — DB에 쓰지 않고 리프레시 토큰도 건드리지 않음) |
+| 실제 한도(5h/7d) | 자체 연결 계정 → `~/.gjc/agent/agent.db` → Claude Code 키체인/`~/.claude/.credentials.json` | `/api/oauth/usage`를 GET — 유효한 액세스 토큰을 위 순서로 찾아 첫 번째로 응답하는 토큰을 씁니다. 자체 연결 계정의 토큰만 앱이 직접 리프레시하고, CLI 토큰은 읽기 전용(리프레시 토큰은 회전되므로 건드리면 CLI 로그인이 깨질 수 있음). 전부 만료면 gjc 캐시 리포트로 폴백하고 UI에 "N시간 전 기준"을 표시합니다 |
 
 비용·토큰은 로컬 로그에서 집계하지만 **한도 소진율은 로컬 로그로 재현할 수 없습니다** — 한도를 재는 단위가 달러가 아니고 플랜 상한도 디스크에 없기 때문입니다. 그래서 이 값만 프로바이더가 알려주는 수치를 그대로 씁니다. 5h/7d 한도는 Anthropic 계정 단위로 공유되므로 Claude Code·GJC 연결 모두에 동일하게 적용됩니다.
 
-앱이 60초마다 집계해 `~/Library/Application Support/AIUsage/snapshot.json`에 저장하고, 위젯은 이 파일만 읽습니다(샌드박스 read-only 예외).
+앱이 60초마다 집계해 `~/Library/Application Support/AIUsage/`에 `snapshot.json`(합산, 구버전 호환)과 `widget-data.json`(합산+소스별), `widget-config.json`(위젯 설정)을 저장하고, 위젯은 이 파일들만 읽습니다(샌드박스 read-only 예외). 계정을 연결하면 같은 폴더의 `oauth.json`(0600)에 자체 토큰이 저장됩니다.
 
 ## 빌드 & 설치
 
@@ -53,10 +55,11 @@
 
 ```
 Sources/
-  Shared/   Models.swift(데이터 모델·포맷·스냅샷 IO), Heatmap.swift(히트맵 캔버스)
+  Shared/   Models.swift(데이터 모델·포맷·스냅샷/위젯 설정 IO), Heatmap.swift(히트맵 캔버스)
   App/      AIUsageApp.swift(NSStatusItem+NSPopover, 연결별 아이콘), Connections.swift(AI 연결 모델),
-            PopoverView.swift, UsageStore.swift(수집·집계), Updater.swift(GitHub 릴리스 자체 업데이트)
-  Widget/   Widgets.swift(위젯 번들 4종)
+            PopoverView.swift, UsageStore.swift(수집·집계), RateLimitProbe.swift(5h/7d 한도 조회),
+            AccountAuth.swift(계정 연결·자체 OAuth 토큰), Updater.swift(GitHub 릴리스 자체 업데이트)
+  Widget/   Widgets.swift(위젯 번들 4종, 앱에서 쓴 설정·소스별 스냅샷을 읽어 렌더)
 Resources/  Info.plist 2종, widget.entitlements, AppIcon.icns(icon.png 기반)
 build.sh    swiftc 직접 빌드 + codesign + 설치/DMG 패키징
 assets/     배포용 버전별 DMG

@@ -83,12 +83,20 @@ final class UsageStore: ObservableObject {
             let combined = Self.aggregate(events: bySource.values.flatMap { $0 },
                                           now: now, limits: limits)
 
+            // Widgets can show the combined view or a single source.
+            var payload = WidgetPayload(combined: combined)
+            for c in conns {
+                payload.sources[c.source.rawValue] = snaps[c.id]
+                payload.names[c.source.rawValue] = c.name
+            }
+
             DispatchQueue.main.async {
                 self.snapshots = snaps
                 self.combined = combined
                 self.lastError = errors.isEmpty ? nil : errors.joined(separator: " / ")
                 self.lastRefresh = Date()
-                try? SnapshotIO.save(combined)
+                try? SnapshotIO.save(combined)          // legacy single-snapshot file
+                try? SnapshotIO.savePayload(payload)
                 WidgetCenter.shared.reloadAllTimelines()
             }
         }
