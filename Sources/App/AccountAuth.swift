@@ -113,33 +113,85 @@ enum AccountTokenStore {
     }
 }
 
-// MARK: - Login flow (browser + pasted code)
+// MARK: - Login flow (browser redirect caught locally; manual paste fallback)
 
 /// UI-facing state machine for linking the Claude account with OAuth + PKCE.
+///
+/// Preferred flow: bind localhost:54545, open the browser, and catch the
+/// redirect automatically — no copy-paste. The console-callback page told
+/// users to "paste this code into the CLI", which made the manual flow a dead
+/// end for many; it now exists only as a fallback when the port is taken.
 @MainActor
 final class AccountAuth: ObservableObject {
     static let shared = AccountAuth()
 
     @Published private(set) var isConnected: Bool
+    /// Local server armed — login completes by itself when the browser returns.
+    @Published private(set) var awaitingCallback = false
+    /// Error from the automatic exchange (shown in the popover).
+    @Published private(set) var autoError: String?
 
     private var pendingVerifier: String?
+    /// The redirect_uri used in the authorize request; the token exchange must
+    /// send the exact same value.
+    private var activeRedirectURI = AccountTokenStore.redirectURI
+    private let server = OAuthCallbackServer()
+    private var loginGeneration = 0
 
     private init() {
         isConnected = AccountTokenStore.load() != nil
     }
 
-    /// Opens the browser at the authorize URL; the callback page shows a
-    /// "code#state" string the user pastes back into the popover.
+    /// Starts the local callback server, then opens the browser. When the
+    /// port can't be bound, falls back to the console callback page whose
+    /// code the user pastes manually.
     func beginLogin() {
+        autoError = nil
         let verifier = Self.randomURLSafe(64)
         pendingVerifier = verifier
+        loginGeneration += 1
+        let generation = loginGeneration
+
+        server.start(
+            onReady: { [weak self] in
+                guard let self, self.loginGeneration == generation else { return }
+                self.awaitingCallback = true
+                self.activeRedirectURI = OAuthCallbackServer.redirectURI
+                self.openAuthorize(verifier: verifier)
+            },
+            onFail: { [weak self] in
+                guard let self, self.loginGeneration == generation else { return }
+                self.awaitingCallback = false
+                self.activeRedirectURI = AccountTokenStore.redirectURI
+                self.openAuthorize(verifier: verifier)
+            },
+            onCode: { [weak self] code, state in
+                guard let self, self.loginGeneration == generation else { return }
+                Task {
+                    do {
+                        try await self.complete(code: state.map { "\(code)#\($0)" } ?? code)
+                    } catch {
+                        self.autoError = error.localizedDescription
+                    }
+                }
+            })
+
+        // Abandoned login: free the port after 10 minutes.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 600) { [weak self] in
+            guard let self, self.loginGeneration == generation, !self.isConnected else { return }
+            self.server.stop()
+            self.awaitingCallback = false
+        }
+    }
+
+    private func openAuthorize(verifier: String) {
         let challenge = Self.base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
         var comps = URLComponents(string: "https://claude.ai/oauth/authorize")!
         comps.queryItems = [
             .init(name: "code", value: "true"),
             .init(name: "client_id", value: AccountTokenStore.clientID),
             .init(name: "response_type", value: "code"),
-            .init(name: "redirect_uri", value: AccountTokenStore.redirectURI),
+            .init(name: "redirect_uri", value: activeRedirectURI),
             .init(name: "scope", value: "org:create_api_key user:profile user:inference"),
             .init(name: "code_challenge", value: challenge),
             .init(name: "code_challenge_method", value: "S256"),
@@ -148,7 +200,8 @@ final class AccountAuth: ObservableObject {
         if let url = comps.url { NSWorkspace.shared.open(url) }
     }
 
-    /// Exchanges the pasted "code#state" for our own token pair.
+    /// Exchanges a "code#state" (from the local callback or a manual paste)
+    /// for our own token pair.
     func complete(code raw: String) async throws {
         guard let verifier = pendingVerifier else {
             throw Self.err("먼저 '브라우저에서 로그인'을 눌러주세요")
@@ -163,7 +216,7 @@ final class AccountAuth: ObservableObject {
             "code": code,
             "state": parts.count > 1 ? parts[1] : verifier,
             "client_id": AccountTokenStore.clientID,
-            "redirect_uri": AccountTokenStore.redirectURI,
+            "redirect_uri": activeRedirectURI,
             "code_verifier": verifier,
         ])
         let (data, response) = try await URLSession.shared.data(for: req)
@@ -173,11 +226,16 @@ final class AccountAuth: ObservableObject {
         }
         AccountTokenStore.save(pair)
         pendingVerifier = nil
+        server.stop()
+        awaitingCallback = false
+        autoError = nil
         isConnected = true
     }
 
     func disconnect() {
         AccountTokenStore.delete()
+        server.stop()
+        awaitingCallback = false
         isConnected = false
     }
 

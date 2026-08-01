@@ -208,14 +208,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// Renders the connection's glyph gauge to a (colored, non-template) image.
     private func renderLabel(for entry: Entry) {
         guard let button = entry.item.button else { return }
-        let view: FilledProviderIcon
+        let view: FilledMenuBarIcon
         if let conn = store.connections.first(where: { $0.id == entry.connectionID }) {
             let snap = store.snapshots[conn.id]
             var kind = snap?.providerKind ?? .generic
             if kind == .generic { kind = conn.source.fallbackProviderKind }
             let fraction = snap.flatMap { $0.fraction(for: conn.metric) }
-            view = FilledProviderIcon(kind: kind, fraction: fraction,
-                                      size: 18, color: conn.color)
+            view = FilledMenuBarIcon(style: conn.icon, provider: kind, fraction: fraction,
+                                     size: 18, color: conn.color)
             var tip = "\(conn.name) — \(conn.metric.title(in: snap))"
             if let fraction { tip += " \(fmtPercent(fraction))" }
             if let resets = quotaWindow(for: conn.metric, in: snap)?.resetsAt, resets > Date() {
@@ -223,8 +223,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             }
             button.toolTip = tip
         } else {
-            view = FilledProviderIcon(kind: .generic, fraction: nil,
-                                      size: 18, color: AIConnection.defaultColor)
+            view = FilledMenuBarIcon(style: .app, provider: .generic, fraction: nil,
+                                     size: 18, color: AIConnection.defaultColor)
             button.toolTip = "AI 노동청 — 클릭해서 AI를 연결하세요"
         }
         let renderer = ImageRenderer(content: view.fixedSize())
@@ -246,6 +246,50 @@ private func quotaWindow(for metric: MetricKind, in snap: UsageSnapshot?) -> Lim
     }
 }
 
+/// The glyph a menu bar entry draws: the AI 노동청 splat, a provider mark, or
+/// a chart. All shapes are silhouettes tinted with the connection color so the
+/// ink-fill gauge reads the same across styles.
+struct MenuBarGlyph: View {
+    let style: IconStyle
+    let provider: ProviderKind   // resolved source provider, used by .auto
+    var size: CGFloat = 18
+    var color: Color = AIConnection.defaultColor
+
+    var body: some View {
+        switch style {
+        case .app: AppIconGlyph(size: size, color: color)
+        case .auto: ProviderIcon(kind: provider, size: size, color: color)
+        case .claude: ProviderIcon(kind: .claude, size: size, color: color)
+        case .gpt: ProviderIcon(kind: .gpt, size: size, color: color)
+        case .gemini: ProviderIcon(kind: .gemini, size: size, color: color)
+        case .chart: ProviderIcon(kind: .generic, size: size, color: color)
+        }
+    }
+}
+
+/// The app icon (starburst splat) as a tintable silhouette. The icns carries
+/// the shape in its alpha channel; template rendering recolors it.
+struct AppIconGlyph: View {
+    var size: CGFloat
+    var color: Color
+
+    private static let image: NSImage? =
+        NSImage(named: "AppIcon") ?? Bundle.main.image(forResource: "AppIcon")
+
+    var body: some View {
+        if let img = Self.image {
+            Image(nsImage: img)
+                .resizable()
+                .renderingMode(.template)
+                .foregroundStyle(color)
+                .frame(width: size, height: size)
+        } else {
+            // Bundle without the icns (shouldn't happen) — closest vector shape.
+            ProviderIcon(kind: .claude, size: size, color: color)
+        }
+    }
+}
+
 /// How much of a glyph's ink sits below a given height.
 ///
 /// The provider marks are radial, so their bottom edge is nearly empty: wiping a
@@ -254,17 +298,19 @@ private func quotaWindow(for metric: MetricKind, in snap: UsageSnapshot?) -> Lim
 /// distribution makes the lit share of the mark match the number it reports.
 @MainActor
 enum GlyphInkProfile {
-    private static let samples = 96
-    /// Per glyph: ink accumulated from the bottom row up, one entry per sample row.
-    private static var cache: [ProviderKind: [Double]] = [:]
+    static let sampleSize = 96
+    private static let samples = sampleSize
+    /// Per glyph key: ink accumulated from the bottom row up, one entry per row.
+    private static var cache: [String: [Double]] = [:]
 
     /// Height (0…1 of the icon) at which the lit ink equals `fraction` of the total.
-    static func maskHeight(kind: ProviderKind, fraction: Double) -> CGFloat {
+    static func maskHeight(key: String, fraction: Double,
+                           profileGlyph: () -> AnyView) -> CGFloat {
         let f = min(max(fraction, 0), 1)
         guard f > 0 else { return 0 }
         guard f < 1 else { return 1 }
         // Without a profile, degrade to the plain height wipe rather than hide the gauge.
-        guard let cumulative = profile(for: kind),
+        guard let cumulative = profile(key: key, glyph: profileGlyph()),
               let total = cumulative.last, total > 0 else { return CGFloat(f) }
 
         let target = f * total
@@ -275,11 +321,10 @@ enum GlyphInkProfile {
         return CGFloat((Double(row) + within) / Double(samples))
     }
 
-    private static func profile(for kind: ProviderKind) -> [Double]? {
-        if let cached = cache[kind] { return cached }
+    private static func profile(key: String, glyph: AnyView) -> [Double]? {
+        if let cached = cache[key] { return cached }
 
-        let renderer = ImageRenderer(content:
-            ProviderIcon(kind: kind, size: CGFloat(samples), color: .black).fixedSize())
+        let renderer = ImageRenderer(content: glyph.fixedSize())
         renderer.scale = 1
         guard let image = renderer.nsImage,
               let tiff = image.tiffRepresentation,
@@ -301,27 +346,36 @@ enum GlyphInkProfile {
             running += ink
             cumulative.append(running)
         }
-        cache[kind] = cumulative
+        cache[key] = cumulative
         return cumulative
     }
 }
 
-/// Provider glyph as a gauge: a dim track with a bright copy on top, masked so
+/// Menu bar glyph as a gauge: a dim track with a bright copy on top, masked so
 /// that `fraction` of the glyph's *ink* is lit. `fraction == nil` shows only the
 /// track.
-struct FilledProviderIcon: View {
-    let kind: ProviderKind
+struct FilledMenuBarIcon: View {
+    let style: IconStyle
+    let provider: ProviderKind
     let fraction: Double?
     var size: CGFloat = 18
     var color: Color = AIConnection.defaultColor
 
+    private var profileKey: String {
+        style == .auto ? "auto-\(provider.rawValue)" : style.rawValue
+    }
+
     var body: some View {
         ZStack {
-            ProviderIcon(kind: kind, size: size, color: color)
+            MenuBarGlyph(style: style, provider: provider, size: size, color: color)
                 .opacity(0.28)
             if let fraction, fraction > 0 {
-                let height = GlyphInkProfile.maskHeight(kind: kind, fraction: fraction)
-                ProviderIcon(kind: kind, size: size, color: color)
+                let height = GlyphInkProfile.maskHeight(key: profileKey, fraction: fraction) {
+                    AnyView(MenuBarGlyph(style: style, provider: provider,
+                                         size: CGFloat(GlyphInkProfile.sampleSize),
+                                         color: .black))
+                }
+                MenuBarGlyph(style: style, provider: provider, size: size, color: color)
                     .mask(alignment: .bottom) {
                         Rectangle()
                             .frame(width: size, height: size * height)

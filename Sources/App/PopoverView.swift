@@ -279,6 +279,22 @@ struct PopoverView: View {
                 })
     }
 
+    private var iconBinding: Binding<String> {
+        Binding(get: { connection?.iconKey ?? IconStyle.app.rawValue },
+                set: { key in
+                    guard var c = connection else { return }
+                    c.iconKey = key
+                    store.updateConnection(c)
+                })
+    }
+
+    /// Provider kind the `.auto` icon style resolves to for this connection.
+    private var iconPreviewProvider: ProviderKind {
+        guard let c = connection else { return .generic }
+        let kind = snapshot?.providerKind ?? .generic
+        return kind == .generic ? c.source.fallbackProviderKind : kind
+    }
+
     private var settingsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("아이콘 설정").font(.subheadline.bold())
@@ -288,6 +304,19 @@ struct PopoverView: View {
                 Text("주간 사용량").tag("week")
             }
             .pickerStyle(.segmented)
+            HStack(spacing: 10) {
+                Picker("아이콘 모양", selection: iconBinding) {
+                    ForEach(IconStyle.allCases) { s in
+                        Text(s.title).tag(s.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(.caption)
+                MenuBarGlyph(style: connection?.icon ?? .app,
+                             provider: iconPreviewProvider,
+                             size: 16,
+                             color: connection?.color ?? AIConnection.defaultColor)
+            }
             ColorPicker("아이콘 색", selection: colorBinding, supportsOpacity: false)
                 .font(.caption)
             Picker("단위 (모델별·히트맵 표시)", selection: $unitKey) {
@@ -404,7 +433,16 @@ struct PopoverView: View {
                         loginStarted = true
                     }
                     .font(.caption)
-                    if loginStarted {
+                    if loginStarted && account.awaitingCallback {
+                        ProgressView().controlSize(.small)
+                        Text("브라우저에서 로그인을 마치면 자동으로 연결됩니다.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                // Manual paste — only needed when the localhost callback
+                // couldn't bind (e.g. Claude Code is mid-login on the port).
+                if loginStarted && !account.awaitingCallback {
+                    HStack(spacing: 8) {
                         TextField("코드 붙여넣기 (code#state)", text: $loginCode)
                             .textFieldStyle(.roundedBorder)
                             .font(.caption)
@@ -416,12 +454,10 @@ struct PopoverView: View {
                                 .disabled(loginCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
-                }
-                if loginStarted {
-                    Text("브라우저 로그인 후 표시되는 코드를 붙여넣고 '연결'을 누르세요.")
+                    Text("자동 연결 포트를 열지 못했습니다. 브라우저에 표시된 코드를 붙여넣고 '연결'을 누르세요.")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
-                if let e = loginError {
+                if let e = loginError ?? account.autoError {
                     Text(e).font(.caption2).foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -429,6 +465,13 @@ struct PopoverView: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+        .onChange(of: account.isConnected) { _, connected in
+            if connected {
+                loginStarted = false
+                loginCode = ""
+                store.refresh()   // pull the live 5h/7d report right away
+            }
+        }
     }
 
     private func completeLogin() {

@@ -52,6 +52,27 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Menu bar icon style
+
+/// Shape drawn in the menu bar for a connection. `.app` — the AI 노동청
+/// starburst splat — is the default; `.auto` follows the detected provider.
+enum IconStyle: String, CaseIterable, Identifiable {
+    case app, auto, claude, gpt, gemini, chart
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .app: return "앱 아이콘"
+        case .auto: return "자동 (프로바이더 감지)"
+        case .claude: return "Claude"
+        case .gpt: return "GPT"
+        case .gemini: return "Gemini"
+        case .chart: return "차트"
+        }
+    }
+}
+
 // MARK: - Connection (one menu bar icon per connection)
 
 struct AIConnection: Codable, Identifiable, Equatable {
@@ -60,12 +81,36 @@ struct AIConnection: Codable, Identifiable, Equatable {
     var name: String
     var colorHex: String     // menu bar icon fill color
     var metricKey: String    // fill basis: "session" | "today" | "week"
+    var iconKey: String      // IconStyle rawValue; menu bar glyph shape
 
     static let defaultColorHex = "00C7BE"   // mint
     static var defaultColor: Color { Color(hex: defaultColorHex) }
 
+    init(id: String, source: SourceKind, name: String, colorHex: String,
+         metricKey: String, iconKey: String = IconStyle.app.rawValue) {
+        self.id = id
+        self.source = source
+        self.name = name
+        self.colorHex = colorHex
+        self.metricKey = metricKey
+        self.iconKey = iconKey
+    }
+
+    /// v2.5 and earlier persisted connections without `iconKey`; decoding must
+    /// not wipe them, so the missing key falls back to the app-icon default.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        source = try c.decode(SourceKind.self, forKey: .source)
+        name = try c.decode(String.self, forKey: .name)
+        colorHex = try c.decode(String.self, forKey: .colorHex)
+        metricKey = try c.decode(String.self, forKey: .metricKey)
+        iconKey = (try? c.decode(String.self, forKey: .iconKey)) ?? IconStyle.app.rawValue
+    }
+
     var color: Color { Color(hex: colorHex) }
     var metric: MetricKind { MetricKind.from(key: metricKey) }
+    var icon: IconStyle { IconStyle(rawValue: iconKey) ?? .app }
 }
 
 /// Persists connections as JSON in user defaults.
