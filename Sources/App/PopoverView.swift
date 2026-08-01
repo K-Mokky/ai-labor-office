@@ -313,7 +313,7 @@ struct PopoverView: View {
             }
             Toggle("새 버전이 있으면 자동으로 설치", isOn: $autoUpdate)
                 .font(.caption)
-            Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 세션·주간은 Anthropic이 실제 적용하는 5시간·7일 한도 기준입니다(100% = 한도 소진). 한도를 읽지 못하면 역대 최대 기록 대비로 표시하고, 오늘은 항상 최고 일간 대비입니다.")
+            Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 세션·주간은 프로바이더가 실제 적용하는 한도 기준입니다(100% = 한도 소진) — Claude는 Anthropic 5시간·7일 한도, Codex는 ChatGPT 플랜의 5시간·주간 한도. 한도를 읽지 못하면(예: Gemini) 역대 최대 기록 대비로 표시하고, 오늘은 항상 최고 일간 대비입니다.")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }

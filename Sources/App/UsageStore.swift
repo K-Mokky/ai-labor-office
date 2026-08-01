@@ -19,6 +19,10 @@ final class UsageStore: ObservableObject {
     @Published var lastRefresh: Date?
 
     private var timer: Timer?
+    /// Refresh runs on a background queue and can take a while on the first
+    /// codex scan; the 60s timer must not stack a second pass on top of it.
+    private var refreshInFlight = false
+    private var refreshQueued = false
 
     init() {
         connections = ConnectionStore.load()
@@ -57,11 +61,15 @@ final class UsageStore: ObservableObject {
     // MARK: - Refresh
 
     func refresh() {
+        guard !refreshInFlight else { refreshQueued = true; return }
+        refreshInFlight = true
         let conns = connections
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var errors: [String] = []
             var bySource: [SourceKind: [UsageEvent]] = [:]
+            // ChatGPT quota logged by Codex CLI alongside its usage events.
+            var gptLimits: [LimitWindow] = []
             for source in Set(conns.map(\.source)) {
                 switch source {
                 case .gjc:
@@ -69,19 +77,27 @@ final class UsageStore: ObservableObject {
                     catch { errors.append("gjc: \(error.localizedDescription)") }
                 case .claudeCode:
                     bySource[.claudeCode] = Self.loadClaudeProjects()
+                case .codex:
+                    let codex = Self.loadCodexSessions()
+                    bySource[.codex] = codex.events
+                    gptLimits = codex.limits
+                case .gemini:
+                    bySource[.gemini] = Self.loadGeminiSessions()
                 }
             }
 
             let now = Date()
             // Provider-enforced 5h/7d quotas; empty when unreadable.
-            let limits = RateLimitProbe.fetch()
+            let claudeLimits = RateLimitProbe.fetch()
             var snaps: [String: UsageSnapshot] = [:]
             for c in conns {
                 snaps[c.id] = Self.aggregate(events: bySource[c.source] ?? [],
-                                             now: now, limits: limits)
+                                             now: now, claudeLimits: claudeLimits,
+                                             gptLimits: gptLimits)
             }
             let combined = Self.aggregate(events: bySource.values.flatMap { $0 },
-                                          now: now, limits: limits)
+                                          now: now, claudeLimits: claudeLimits,
+                                          gptLimits: gptLimits)
 
             // Widgets can show the combined view or a single source.
             var payload = WidgetPayload(combined: combined)
@@ -91,6 +107,7 @@ final class UsageStore: ObservableObject {
             }
 
             DispatchQueue.main.async {
+                self.refreshInFlight = false
                 self.snapshots = snaps
                 self.combined = combined
                 self.lastError = errors.isEmpty ? nil : errors.joined(separator: " / ")
@@ -98,6 +115,10 @@ final class UsageStore: ObservableObject {
                 try? SnapshotIO.save(combined)          // legacy single-snapshot file
                 try? SnapshotIO.savePayload(payload)
                 WidgetCenter.shared.reloadAllTimelines()
+                if self.refreshQueued {      // e.g. a connection changed mid-scan
+                    self.refreshQueued = false
+                    self.refresh()
+                }
             }
         }
     }
@@ -296,11 +317,206 @@ final class UsageStore: ObservableObject {
         return Array(byMessageID.values) + anonymous
     }
 
+    // MARK: - Codex CLI rollout JSONL
+
+    struct CodexData {
+        var events: [UsageEvent]
+        var limits: [LimitWindow]
+    }
+
+    /// Parses `~/.codex/sessions/**/rollout-*.jsonl`. Each turn appends an
+    /// `event_msg`/`token_count` line whose `last_token_usage` is that
+    /// response's tokens; those sum to local usage. The same line also carries
+    /// the ChatGPT plan quota (`rate_limits.used_percent`) metered by the
+    /// provider — the newest one becomes the GPT 5h/weekly limit windows.
+    ///
+    /// The sessions dir grows into gigabytes, so results are cached per file
+    /// keyed by byte size: rollouts are append-only, meaning an unchanged size
+    /// is an unchanged file. Only new/grown files are re-parsed each refresh.
+    private struct CodexFileCache {
+        var size: UInt64
+        var events: [UsageEvent]
+        var newestLimits: (ts: Date, windows: [LimitWindow])?
+    }
+    private static var codexCache: [String: CodexFileCache] = [:]
+
+    static func loadCodexSessions() -> CodexData {
+        let fm = FileManager.default
+        let root = SnapshotIO.realHome + "/.codex/sessions"
+        guard let en = fm.enumerator(atPath: root) else { return CodexData(events: [], limits: []) }
+
+        var events: [UsageEvent] = []
+        var newestLimits: (ts: Date, windows: [LimitWindow])?
+        func offerLimits(_ candidate: (ts: Date, windows: [LimitWindow])?) {
+            if let c = candidate, newestLimits == nil || c.ts > newestLimits!.ts {
+                newestLimits = c
+            }
+        }
+
+        for case let rel as String in en where rel.hasSuffix(".jsonl") {
+            let path = root + "/" + rel
+            let size = (try? fm.attributesOfItem(atPath: path)[.size] as? UInt64) ?? 0
+            if let cached = codexCache[path], cached.size == size, size > 0 {
+                events += cached.events
+                offerLimits(cached.newestLimits)
+                continue
+            }
+            let parsed = parseCodexRollout(path: path)
+            codexCache[path] = CodexFileCache(size: size, events: parsed.events,
+                                              newestLimits: parsed.newestLimits)
+            events += parsed.events
+            offerLimits(parsed.newestLimits)
+        }
+        // A window whose reset already passed describes an expired quota
+        // period; showing it as current would be wrong, so drop it and let
+        // percentages fall back to local history.
+        let live = (newestLimits?.windows ?? []).filter { ($0.resetsAt ?? .distantFuture) > Date() }
+        return CodexData(events: events, limits: live)
+    }
+
+    private static func parseCodexRollout(path: String)
+        -> (events: [UsageEvent], newestLimits: (ts: Date, windows: [LimitWindow])?) {
+        guard let data = FileManager.default.contents(atPath: path),
+              let text = String(data: data, encoding: .utf8) else { return ([], nil) }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+
+        var events: [UsageEvent] = []
+        var newestLimits: (ts: Date, windows: [LimitWindow])?
+        var model = "gpt"   // rollouts name the model in turn_context lines
+
+        for line in text.split(separator: "\n") {
+            // Cheap prefilter: only two of the many line kinds matter.
+            guard line.contains("\"token_count\"") || line.contains("\"turn_context\"")
+            else { continue }
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let payload = obj["payload"] as? [String: Any] else { continue }
+
+            if obj["type"] as? String == "turn_context" {
+                if let m = payload["model"] as? String { model = m }
+                continue
+            }
+            guard payload["type"] as? String == "token_count",
+                  let tsStr = obj["timestamp"] as? String,
+                  let ts = iso.date(from: tsStr) ?? isoPlain.date(from: tsStr)
+            else { continue }
+
+            if let info = payload["info"] as? [String: Any],
+               let last = info["last_token_usage"] as? [String: Any] {
+                let input = last["input_tokens"] as? Int ?? 0        // includes cached
+                let cached = last["cached_input_tokens"] as? Int ?? 0
+                let output = last["output_tokens"] as? Int ?? 0      // includes reasoning
+                let tokens = last["total_tokens"] as? Int ?? (input + output)
+                if tokens > 0 {
+                    let cost = estimateCost(model: model, input: max(0, input - cached),
+                                            output: output, cacheRead: cached, cacheWrite: 0)
+                    events.append(UsageEvent(ts: ts, model: model, tokens: tokens,
+                                             cost: cost, provider: "openai"))
+                }
+            }
+            if let rl = payload["rate_limits"] as? [String: Any],
+               newestLimits == nil || ts > newestLimits!.ts {
+                let windows = codexWindows(rl, asOf: ts)
+                if !windows.isEmpty { newestLimits = (ts, windows) }
+            }
+        }
+        return (events, newestLimits)
+    }
+
+    /// `primary` is the rolling 5h window, `secondary` the weekly one. Only
+    /// those two sizes map onto the app's 5h/7d slots; other plans (e.g. the
+    /// free tier's 30-day window) don't fit and are dropped.
+    private static func codexWindows(_ rl: [String: Any], asOf: Date) -> [LimitWindow] {
+        func window(_ key: String) -> LimitWindow? {
+            guard let w = rl[key] as? [String: Any],
+                  let used = w["used_percent"] as? Double,
+                  let minutes = w["window_minutes"] as? Int else { return nil }
+            let id: String, label: String
+            switch minutes {
+            case ...360: (id, label) = ("5h", "GPT 5 Hour")
+            case 10080: (id, label) = ("7d", "GPT Weekly")
+            default: return nil
+            }
+            let resets = (w["resets_at"] as? Double).map { Date(timeIntervalSince1970: $0) }
+                ?? (w["resets_in_seconds"] as? Double).map { asOf.addingTimeInterval($0) }
+            return LimitWindow(id: id, label: label, usedFraction: used / 100,
+                               resetsAt: resets, asOf: asOf)
+        }
+        var out: [LimitWindow] = []
+        if let p = window("primary") { out.append(p) }
+        if let s = window("secondary"), !out.contains(where: { $0.id == s.id }) { out.append(s) }
+        return out
+    }
+
+    // MARK: - Gemini CLI session JSON
+
+    /// Parses `~/.gemini/tmp/<project>/chats/session-*.json`. Each "gemini"
+    /// message carries its model and token counts. Checkpoint subfolders under
+    /// chats/ hold resaved copies of the same messages, so only files sitting
+    /// directly in chats/ count; message ids dedupe the rest.
+    static func loadGeminiSessions() -> [UsageEvent] {
+        let fm = FileManager.default
+        let root = SnapshotIO.realHome + "/.gemini/tmp"
+        guard let en = fm.enumerator(atPath: root) else { return [] }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+
+        var byID: [String: UsageEvent] = [:]
+        var anonymous: [UsageEvent] = []
+
+        for case let rel as String in en {
+            let comps = rel.split(separator: "/")
+            guard comps.count >= 2, comps[comps.count - 2] == "chats",
+                  let name = comps.last, name.hasPrefix("session-"), name.hasSuffix(".json")
+            else { continue }
+            guard let data = fm.contents(atPath: root + "/" + rel),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let messages = obj["messages"] as? [[String: Any]] else { continue }
+
+            for m in messages {
+                guard m["type"] as? String == "gemini",
+                      let tok = m["tokens"] as? [String: Any],
+                      let tsStr = m["timestamp"] as? String,
+                      let ts = iso.date(from: tsStr) ?? isoPlain.date(from: tsStr)
+                else { continue }
+
+                let input = tok["input"] as? Int ?? 0        // includes cached
+                let cached = tok["cached"] as? Int ?? 0
+                let output = tok["output"] as? Int ?? 0
+                let thoughts = tok["thoughts"] as? Int ?? 0
+                let tool = tok["tool"] as? Int ?? 0
+                let tokens = tok["total"] as? Int ?? (input + output + thoughts + tool)
+                guard tokens > 0 else { continue }
+
+                let model = m["model"] as? String ?? "gemini"
+                let cost = estimateCost(model: model, input: max(0, input - cached),
+                                        output: output + thoughts,
+                                        cacheRead: cached, cacheWrite: 0)
+                let ev = UsageEvent(ts: ts, model: model, tokens: tokens, cost: cost,
+                                    provider: "google")
+                if let id = m["id"] as? String { byID[id] = ev } else { anonymous.append(ev) }
+            }
+        }
+        return Array(byID.values) + anonymous
+    }
+
     /// Rough public API pricing per million tokens, matched by model family substring.
     static func estimateCost(model: String, input: Int, output: Int, cacheRead: Int, cacheWrite: Int) -> Double {
         let m = model.lowercased()
         let (i, o, cr, cw): (Double, Double, Double, Double)
-        if m.contains("opus") { (i, o, cr, cw) = (15, 75, 1.5, 18.75) }
+        if m.contains("gpt") || m.contains("codex")
+            || m.hasPrefix("o1") || m.hasPrefix("o3") || m.hasPrefix("o4") {
+            (i, o, cr, cw) = (1.25, 10, 0.125, 0)                            // gpt-5 family
+        }
+        else if m.contains("gemini") {
+            (i, o, cr, cw) = m.contains("flash") ? (0.3, 2.5, 0.03, 0)
+                                                 : (1.25, 10, 0.125, 0)      // pro
+        }
+        else if m.contains("opus") { (i, o, cr, cw) = (15, 75, 1.5, 18.75) }
         else if m.contains("haiku") { (i, o, cr, cw) = (0.8, 4, 0.08, 1) }
         else { (i, o, cr, cw) = (3, 15, 0.3, 3.75) } // sonnet & default
         return (Double(input) * i + Double(output) * o
@@ -310,7 +526,8 @@ final class UsageStore: ObservableObject {
     // MARK: - Aggregation
 
     static func aggregate(events: [UsageEvent], now: Date = Date(),
-                          limits: [LimitWindow] = []) -> UsageSnapshot {
+                          claudeLimits: [LimitWindow] = [],
+                          gptLimits: [LimitWindow] = []) -> UsageSnapshot {
         let cal = Calendar.current
         let todayKey = dayKeyFormatter.string(from: now)
         let weekStart = cal.date(byAdding: .day, value: -6, to: cal.startOfDay(for: now))!
@@ -382,10 +599,15 @@ final class UsageStore: ObservableObject {
 
         let provider = ProviderKind.detect(provider: sorted.last?.provider,
                                            model: sorted.last?.model)
-        // The 5h/7d quotas belong to the Anthropic account and are shared by
-        // every client billing to it, so they apply to any Claude-backed
-        // connection — but never to a GPT/generic one.
-        let quota = provider == .claude ? limits : []
+        // Quotas belong to the provider account and are shared by every client
+        // billing to it: Anthropic's 5h/7d windows apply to any Claude-backed
+        // connection, the ChatGPT plan windows to any GPT-backed one.
+        let quota: [LimitWindow]
+        switch provider {
+        case .claude: quota = claudeLimits
+        case .gpt: quota = gptLimits
+        default: quota = []
+        }
 
         return UsageSnapshot(
             generatedAt: now,

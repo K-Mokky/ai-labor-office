@@ -7,6 +7,8 @@ import AppKit
 enum SourceKind: String, Codable, CaseIterable, Identifiable {
     case claudeCode   // ~/.claude/projects/**/*.jsonl
     case gjc          // ~/.gjc/stats.db
+    case codex        // ~/.codex/sessions/**/*.jsonl
+    case gemini       // ~/.gemini/tmp/*/chats/session-*.json
 
     var id: String { rawValue }
 
@@ -14,6 +16,8 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: return "Claude Code"
         case .gjc: return "GJC"
+        case .codex: return "Codex CLI"
+        case .gemini: return "Gemini CLI"
         }
     }
 
@@ -21,6 +25,8 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: return "~/.claude/projects"
         case .gjc: return "~/.gjc/stats.db"
+        case .codex: return "~/.codex/sessions"
+        case .gemini: return "~/.gemini/tmp"
         }
     }
 
@@ -30,6 +36,8 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: return fm.fileExists(atPath: SnapshotIO.realHome + "/.claude/projects")
         case .gjc: return fm.fileExists(atPath: SnapshotIO.realHome + "/.gjc/stats.db")
+        case .codex: return fm.fileExists(atPath: SnapshotIO.realHome + "/.codex/sessions")
+        case .gemini: return fm.fileExists(atPath: SnapshotIO.realHome + "/.gemini/tmp")
         }
     }
 
@@ -38,6 +46,8 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: return .claude
         case .gjc: return .generic
+        case .codex: return .gpt
+        case .gemini: return .gemini
         }
     }
 }

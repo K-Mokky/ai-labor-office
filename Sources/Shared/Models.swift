@@ -195,14 +195,28 @@ func fmtAgo(_ date: Date) -> String {
 }
 
 func prettyModelName(_ id: String) -> String {
-    // "claude-fable-5" -> "Fable 5", "claude-opus-4-8" -> "Opus 4.8"
-    var parts = id.split(separator: "-").map(String.init)
-    if parts.first?.lowercased() == "claude" { parts.removeFirst() }
+    let parts = id.split(separator: "-").map(String.init)
     guard !parts.isEmpty else { return id }
-    let family = parts[0].prefix(1).uppercased() + parts[0].dropFirst()
-    let nums = parts.dropFirst().filter { Int($0) != nil }
-    if nums.isEmpty { return family }
-    return "\(family) \(nums.joined(separator: "."))"
+
+    // "claude-fable-5" -> "Fable 5", "claude-opus-4-8" -> "Opus 4.8"
+    if parts.first?.lowercased() == "claude" {
+        let rest = Array(parts.dropFirst())
+        guard let first = rest.first else { return id }
+        let family = first.prefix(1).uppercased() + first.dropFirst()
+        let nums = rest.dropFirst().filter { Int($0) != nil }
+        if nums.isEmpty { return family }
+        return "\(family) \(nums.joined(separator: "."))"
+    }
+
+    // "gpt-5.2-codex" -> "GPT 5.2 Codex", "gemini-3.1-pro-preview" -> "Gemini 3.1 Pro"
+    let noise: Set<String> = ["preview", "latest", "exp", "001", "002"]
+    let kept = parts.filter { !noise.contains($0.lowercased()) }
+    let words = (kept.isEmpty ? parts : kept).map { p -> String in
+        if p.lowercased() == "gpt" { return "GPT" }
+        if p.first?.isNumber == true { return p }
+        return p.prefix(1).uppercased() + p.dropFirst()
+    }
+    return words.joined(separator: " ")
 }
 
 // MARK: - Percent (usage vs historical max) & provider

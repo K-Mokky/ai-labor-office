@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - Provider detection
 
 enum ProviderKind: String {
-    case claude, gpt, generic
+    case claude, gpt, gemini, generic
 
     /// Detects the provider from a raw provider string (gjc stats.db) or a model id.
     static func detect(provider: String?, model: String?) -> ProviderKind {
@@ -11,6 +11,9 @@ enum ProviderKind: String {
         let m = (model ?? "").lowercased()
         if p.contains("anthropic") || p.contains("claude") || m.contains("claude") {
             return .claude
+        }
+        if p.contains("google") || p.contains("gemini") || m.contains("gemini") {
+            return .gemini
         }
         if p.contains("openai") || p.contains("gpt") || p.contains("codex")
             || m.hasPrefix("gpt") || m.hasPrefix("o1") || m.hasPrefix("o3")
@@ -24,6 +27,7 @@ enum ProviderKind: String {
         switch self {
         case .claude: return Color(red: 0.85, green: 0.47, blue: 0.34)  // Anthropic terracotta
         case .gpt: return Color(red: 0.06, green: 0.64, blue: 0.50)     // OpenAI teal
+        case .gemini: return Color(red: 0.35, green: 0.49, blue: 0.95)  // Gemini blue
         case .generic: return .accentColor
         }
     }
@@ -43,6 +47,7 @@ struct ProviderIcon: View {
         switch kind {
         case .claude: claude(c)
         case .gpt: gpt(c)
+        case .gemini: gemini(c)
         case .generic:
             Image(systemName: "chart.bar.fill")
                 .font(.system(size: size * 0.75))
@@ -88,6 +93,28 @@ struct ProviderIcon: View {
                 ctx.stroke(p, with: .color(color),
                            style: StrokeStyle(lineWidth: sz.width * 0.11, lineCap: .round))
             }
+        }
+        .frame(width: size, height: size)
+    }
+
+    /// Gemini: four-point spark with concave edges.
+    private func gemini(_ color: Color) -> some View {
+        Canvas { ctx, sz in
+            let c = CGPoint(x: sz.width / 2, y: sz.height / 2)
+            let r = sz.width * 0.5
+            let pinch = r * 0.18
+            var p = Path()
+            p.move(to: CGPoint(x: c.x, y: c.y - r))
+            p.addQuadCurve(to: CGPoint(x: c.x + r, y: c.y),
+                           control: CGPoint(x: c.x + pinch, y: c.y - pinch))
+            p.addQuadCurve(to: CGPoint(x: c.x, y: c.y + r),
+                           control: CGPoint(x: c.x + pinch, y: c.y + pinch))
+            p.addQuadCurve(to: CGPoint(x: c.x - r, y: c.y),
+                           control: CGPoint(x: c.x - pinch, y: c.y + pinch))
+            p.addQuadCurve(to: CGPoint(x: c.x, y: c.y - r),
+                           control: CGPoint(x: c.x - pinch, y: c.y - pinch))
+            p.closeSubpath()
+            ctx.fill(p, with: .color(color))
         }
         .frame(width: size, height: size)
     }

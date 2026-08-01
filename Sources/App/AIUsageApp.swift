@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        if migrateToASCIIBundleNameIfNeeded() { return }   // relaunching from the new path
 
         store.$connections
             .receive(on: DispatchQueue.main)
@@ -69,6 +70,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
             }
         }
+    }
+
+    /// v2.4 and earlier installed as "AI 노동청.app". ExtensionKit resolves the
+    /// widget appex through a URL in decomposed form (NFD) while LaunchServices
+    /// stores the composed path, so the lookup fails ("not found in LS
+    /// database") and the widgets never reach the gallery. An ASCII bundle
+    /// path sidesteps the normalization mismatch; the Finder name stays Korean
+    /// via ko.lproj/InfoPlist.strings. Old installs (including in-place
+    /// self-updates, which keep the old folder name) move themselves once.
+    private func migrateToASCIIBundleNameIfNeeded() -> Bool {
+        let fm = FileManager.default
+        let url = Bundle.main.bundleURL
+        guard url.deletingLastPathComponent().path == "/Applications",
+              url.lastPathComponent != "AIUsage.app" else { return false }
+        let dest = url.deletingLastPathComponent().appendingPathComponent("AIUsage.app")
+        try? fm.removeItem(at: dest)   // stale copy from an earlier attempt
+        do { try fm.moveItem(at: url, to: dest) } catch { return false }
+
+        let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks"
+            + "/LaunchServices.framework/Support/lsregister"
+        for args in [["-u", url.path],
+                     ["-f", dest.path],
+                     ["-f", dest.path + "/Contents/Extensions/AIUsageWidget.appex"]] {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: lsregister)
+            p.arguments = args
+            try? p.run()
+            p.waitUntilExit()
+        }
+
+        let opener = Process()
+        opener.executableURL = URL(fileURLWithPath: "/bin/sh")
+        opener.arguments = ["-c", "sleep 1; exec /usr/bin/open \"$0\"", dest.path]
+        try? opener.run()
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+        return true
     }
 
     // MARK: - Status items
