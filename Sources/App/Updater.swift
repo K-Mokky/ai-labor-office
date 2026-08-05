@@ -121,8 +121,13 @@ final class Updater: ObservableObject {
                 let target = try await Task.detached {
                     try Self.replaceBundle(with: dmg)
                 }.value
-                Self.relaunch(target)
+                if !Self.relaunch(target) {
+                    // 새 번들은 이미 설치됨 — 다음 수동 실행 때 반영된다. busy 상태로
+                    // 남으면 이후 업데이트 확인까지 막히므로 .failed로 풀어준다.
+                    phase = .failed("업데이트는 설치되었지만 재시작에 실패했습니다 — 앱을 수동으로 다시 실행하세요")
+                }
             } catch {
+                NSLog("[Updater] install failed: %@", error.localizedDescription)
                 phase = .failed("업데이트 실패: \(error.localizedDescription)")
             }
         }
@@ -152,8 +157,21 @@ final class Updater: ObservableObject {
             try? fm.removeItem(at: dmg)
         }
 
-        guard let appName = try fm.contentsOfDirectory(atPath: mount.path)
-            .first(where: { $0.hasSuffix(".app") }) else { throw err("DMG 안에 .app이 없습니다") }
+        // 아무 .app이나 설치하면 위험하다 — 번들 ID가 우리 앱과 일치하는 것만 채택.
+        let expectedID = Bundle.main.bundleIdentifier ?? "com.mokky.aiusage"
+        let apps = try fm.contentsOfDirectory(atPath: mount.path).filter { $0.hasSuffix(".app") }
+        var foundIDs: [String] = []
+        var matched: String?
+        for name in apps {
+            let id = Bundle(url: mount.appendingPathComponent(name))?.bundleIdentifier ?? "(식별자 없음)"
+            foundIDs.append(id)
+            if id == expectedID { matched = name; break }
+        }
+        guard let appName = matched else {
+            throw err(apps.isEmpty
+                ? "DMG 안에 .app이 없습니다"
+                : "DMG 안에 \(expectedID) 앱이 없습니다 (발견: \(foundIDs.joined(separator: ", ")))")
+        }
         let source = mount.appendingPathComponent(appName)
         let target = Bundle.main.bundleURL
         let parked = fm.temporaryDirectory
@@ -173,13 +191,20 @@ final class Updater: ObservableObject {
     }
 
     /// Spawns a detached opener that outlives this process, then quits so the
-    /// new binary takes over the status items.
-    nonisolated private static func relaunch(_ appURL: URL) {
+    /// new binary takes over the status items. Returns false when the opener
+    /// could not be spawned — the caller must then keep the app running.
+    nonisolated private static func relaunch(_ appURL: URL) -> Bool {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", "sleep 1; exec /usr/bin/open \"$0\"", appURL.path]
-        try? p.run()
+        do {
+            try p.run()
+        } catch {
+            NSLog("[Updater] relaunch spawn failed: %@", error.localizedDescription)
+            return false
+        }
         DispatchQueue.main.async { NSApp.terminate(nil) }
+        return true
     }
 
     // MARK: - Helpers

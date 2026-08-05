@@ -45,13 +45,13 @@
 
 ## 배포 (.dmg)
 
-`./build.sh dmg`가 `Resources/App-Info.plist`의 `CFBundleShortVersionString`을 읽어 `assets/AI-노동청-<버전>.dmg`를 만듭니다. DMG에는 앱과 `/Applications` 심링크가 들어 있어 드래그로 설치합니다.
+`./build.sh dmg`가 `Resources/App-Info.plist`의 `CFBundleShortVersionString`을 읽어 `assets/AI-노동청-<버전>.dmg`(로컬 보관용)와 `assets/AI-Nodongcheong-<버전>.dmg`(릴리스 업로드용 ASCII 이름 — 한글 파일명은 GitHub이 지워버림)를 함께 만듭니다. DMG에는 앱과 `/Applications` 심링크가 들어 있어 드래그로 설치합니다. 빌드는 시작 전에 두 plist의 버전이 일치하는지 검사하고, 불일치면 아무것도 지우지 않고 실패합니다.
 
 버전 업데이트 절차:
 
-1. `Resources/App-Info.plist`와 `Resources/Widget-Info.plist`의 `CFBundleShortVersionString`(필요시 `CFBundleVersion`)을 올린다.
-2. `./build.sh dmg` 실행 → `assets/`에 새 버전 파일이 추가된다 (기존 버전 파일은 그대로 유지).
-3. 커밋 후 푸시하고, 앱 버전과 같은 태그로 릴리스를 만든다: `git tag v<버전> && git push origin v<버전>` 후 `gh release create v<버전> <dmg>`. 릴리스 에셋 파일명은 ASCII로 올린다(한글은 GitHub이 지워버림, 예: `AI-Nodongcheong-<버전>.dmg`). `.dmg` 에셋이 꼭 있어야 앱 내 업데이트가 동작한다.
+1. `Resources/App-Info.plist`와 `Resources/Widget-Info.plist`의 `CFBundleShortVersionString`·`CFBundleVersion`을 둘 다 같은 값으로 올린다 (불일치면 빌드가 실패한다).
+2. `./build.sh dmg` 실행 → `assets/`에 한글·ASCII 두 파일이 추가된다 (기존 버전 파일은 그대로 유지).
+3. 커밋 후 푸시하고, 앱 버전과 같은 태그로 릴리스를 만든다: `git tag v<버전> && git push origin main v<버전>` 후 `gh release create v<버전> assets/AI-Nodongcheong-<버전>.dmg`. `.dmg` 에셋이 꼭 있어야 앱 내 업데이트가 동작한다.
 
 앱은 실행 시(및 6시간마다) 최신 릴리스 태그를 확인해서, 현재 버전보다 높으면 DMG를 받아 스스로 교체하고 재시작합니다(`Sources/App/Updater.swift`). 자동 설치는 팝오버 설정에서 끌 수 있습니다.
 

@@ -40,11 +40,17 @@ enum LoginItem {
                 }
                 removeAgent()          // SMAppService owns it now
             } catch {
+                NSLog("[LoginItem] SMAppService register failed: %@ — falling back to LaunchAgent",
+                      error.localizedDescription)
                 writeAgent()
             }
         } else {
             if SMAppService.mainApp.status == .enabled {
-                try? SMAppService.mainApp.unregister()
+                do {
+                    try SMAppService.mainApp.unregister()
+                } catch {
+                    NSLog("[LoginItem] SMAppService unregister failed: %@", error.localizedDescription)
+                }
             }
             removeAgent()
         }
@@ -69,14 +75,22 @@ enum LoginItem {
             "RunAtLoad": true,
         ]
         let dir = agentURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        guard let data = try? PropertyListSerialization.data(
-            fromPropertyList: plist, format: .xml, options: 0) else { return }
-        try? data.write(to: agentURL, options: .atomic)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let data = try PropertyListSerialization.data(
+                fromPropertyList: plist, format: .xml, options: 0)
+            try data.write(to: agentURL, options: .atomic)
+        } catch {
+            NSLog("[LoginItem] LaunchAgent write failed: %@", error.localizedDescription)
+        }
     }
 
     private static func removeAgent() {
         guard hasAgent else { return }
-        try? FileManager.default.removeItem(at: agentURL)
+        do {
+            try FileManager.default.removeItem(at: agentURL)
+        } catch {
+            NSLog("[LoginItem] LaunchAgent remove failed: %@", error.localizedDescription)
+        }
     }
 }

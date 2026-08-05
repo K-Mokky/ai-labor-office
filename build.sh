@@ -17,6 +17,18 @@ APP="$BUILD/AIUsage.app"
 APPEX="$APP/Contents/Extensions/AIUsageWidget.appex"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
+# 두 plist의 버전이 어긋난 채 빌드되는 사고 방지 — rm -rf 전에 검사해서
+# 불일치면 기존 build/를 건드리지 않고 바로 실패한다.
+APP_VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/App-Info.plist)
+APP_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Resources/App-Info.plist)
+WIDGET_VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Widget-Info.plist)
+WIDGET_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Resources/Widget-Info.plist)
+if [[ "$APP_VER" != "$WIDGET_VER" || "$APP_BUILD" != "$WIDGET_BUILD" ]]; then
+  echo "error: 버전 불일치 — App-Info.plist($APP_VER/$APP_BUILD) vs Widget-Info.plist($WIDGET_VER/$WIDGET_BUILD)" >&2
+  echo "       두 plist의 CFBundleShortVersionString·CFBundleVersion을 맞춘 뒤 다시 빌드하세요." >&2
+  exit 1
+fi
+
 rm -rf "$BUILD"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ko.lproj" \
          "$APPEX/Contents/MacOS" "$APPEX/Contents/Resources/ko.lproj"
@@ -75,15 +87,18 @@ if [[ "${1:-}" == "install" ]]; then
 fi
 
 if [[ "${1:-}" == "dmg" ]]; then
-  VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/App-Info.plist)
+  VERSION="$APP_VER"
   ASSETS=assets
   DMG="$ASSETS/AI-노동청-$VERSION.dmg"
+  DMG_ASCII="$ASSETS/AI-Nodongcheong-$VERSION.dmg"   # GitHub 릴리스 에셋용(한글 파일명은 GitHub이 지움)
   mkdir -p "$ASSETS"
   STAGE=$(mktemp -d)
   cp -R "$APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
-  rm -f "$DMG"
+  rm -f "$DMG" "$DMG_ASCII"
   hdiutil create -volname "AI 노동청 $VERSION" -srcfolder "$STAGE" -format UDZO -ov "$DMG" >/dev/null
   rm -rf "$STAGE"
+  cp "$DMG" "$DMG_ASCII"
   echo "==> DMG: $DMG"
+  echo "==> DMG (릴리스 업로드용): $DMG_ASCII"
 fi
