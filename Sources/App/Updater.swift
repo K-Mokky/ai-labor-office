@@ -24,7 +24,7 @@ final class Updater: ObservableObject {
         case failed(String)
     }
 
-    static let repo = "K-Mokky/ai-usage"
+    static let repo = "K-Mokky/ai-labor-office"
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var lastChecked: Date?

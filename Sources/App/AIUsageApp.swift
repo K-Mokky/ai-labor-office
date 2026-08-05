@@ -37,6 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSApp.setActivationPolicy(.accessory)
         if migrateToASCIIBundleNameIfNeeded() { return }   // relaunching from the new path
 
+        LoginItem.refreshAgentPathIfNeeded()
+
         store.$connections
             .receive(on: DispatchQueue.main)
             .sink { [weak self] conns in

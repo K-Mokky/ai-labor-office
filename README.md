@@ -12,6 +12,7 @@
 - **위젯 4종**: 기여 그래프(중/대), 요약(소/중), 모델별(소/중), 세션 링 게이지(소)
 - **위젯 설정**: 팝오버 설정의 "위젯 설정"에서 위젯마다 데이터 소스(전체 합산/개별 AI)와 단위(비용/토큰)를 고를 수 있습니다. swiftc 단독 빌드에는 Xcode의 AppIntents 메타데이터 프로세서가 없어 위젯 자체 편집 UI 대신 앱에서 설정합니다.
 - **한도 계정 연결**: CLI가 남긴 토큰은 몇 시간이면 만료되어, CLI를 다시 열기 전까지 Claude 5h/7d 한도가 갱신되지 않습니다. 팝오버 설정의 "한도 계정 연결"로 Claude 계정을 직접 연결(OAuth+PKCE)하면 앱이 자체 토큰을 보유·갱신하므로 CLI 없이도 한도가 계속 갱신됩니다. 로그인은 앱이 `localhost:54545`(Claude Code가 등록한 콜백)로 리다이렉트를 직접 받아 **자동으로 완료**됩니다 — 코드 복사/붙여넣기 없음. 포트를 열지 못한 경우에만 코드 붙여넣기 폴백이 나타납니다.
+- **로그인 시 자동 실행**: 팝오버 설정의 "컴퓨터를 켤 때 자동으로 실행"을 켜면 재부팅·로그인 후 앱이 저절로 뜹니다. 기본은 `SMAppService`(로그인 항목)로 등록하고, ad-hoc 서명 번들을 LaunchServices가 거부하는 경우에만 `~/Library/LaunchAgents/com.mokky.aiusage.launchatlogin.plist`로 폴백합니다. 앱이 자기 자신을 옮기면(ASCII 번들명 이사·자체 업데이트) 다음 실행 때 폴백 경로를 갱신합니다.
 
 ## 데이터 소스
 
@@ -68,7 +69,8 @@ Sources/
             RateLimitProbe.swift(Claude 5h/7d 한도 조회),
             AccountAuth.swift(계정 연결·자체 OAuth 토큰),
             OAuthCallbackServer.swift(localhost:54545 로그인 콜백 수신),
-            Updater.swift(GitHub 릴리스 자체 업데이트)
+            Updater.swift(GitHub 릴리스 자체 업데이트),
+            LoginItem.swift(로그인 시 자동 실행 — SMAppService + LaunchAgent 폴백)
   Widget/   Widgets.swift(위젯 번들 4종, 앱에서 쓴 설정·소스별 스냅샷을 읽어 렌더)
 Resources/  Info.plist 2종, widget.entitlements, AppIcon.icns(icon.png 기반)
 build.sh    swiftc 직접 빌드 + codesign + 설치/DMG 패키징
