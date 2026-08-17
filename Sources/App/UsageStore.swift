@@ -83,6 +83,11 @@ final class UsageStore: ObservableObject {
                     gptLimits = codex.limits
                 case .gemini:
                     bySource[.gemini] = Self.loadGeminiSessions()
+                case .cursor:
+                    bySource[.cursor] = Self.loadCursorSessions()
+                case .grok:
+                    do { bySource[.grok] = try Self.loadGrokUsage() }
+                    catch { errors.append("grok: \(error.localizedDescription)") }
                 }
             }
 
@@ -132,6 +137,33 @@ final class UsageStore: ObservableObject {
         }
     }
 
+    /// Copies a SQLite db (+wal/shm) to a temp dir — so reads never contend
+    /// with the CLI writing it, and WAL reads work even without a live writer
+    /// having set up the shm — then runs `body` on the open copy.
+    static func withSQLiteCopy<T>(of src: String, label: String,
+                                  _ body: (OpaquePointer) throws -> T) throws -> T {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory
+            .appendingPathComponent("aiusage-\(label)-\(getpid())", isDirectory: true)
+        try? fm.removeItem(at: tmp)
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmp) }
+        let name = (src as NSString).lastPathComponent
+        for suffix in ["", "-wal", "-shm"] where fm.fileExists(atPath: src + suffix) {
+            try? fm.copyItem(atPath: src + suffix,
+                             toPath: tmp.appendingPathComponent(name + suffix).path)
+        }
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(tmp.appendingPathComponent(name).path, &handle,
+                              SQLITE_OPEN_READWRITE, nil) == SQLITE_OK, let db = handle else {
+            let msg = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
+            sqlite3_close(handle)
+            throw StoreError.sqlite(msg)
+        }
+        defer { sqlite3_close(db) }
+        return try body(db)
+    }
+
     static func loadGJCStats() throws -> [UsageEvent] {
         let fm = FileManager.default
         let src = SnapshotIO.realHome + "/.gjc/stats.db"
@@ -141,69 +173,50 @@ final class UsageStore: ObservableObject {
             return loadGJCSessionEvents(root: sessionsRoot, offsets: [:])
         }
 
-        // Copy db (+wal/shm) to a temp dir so we never contend with the writer
-        // and WAL reads work even without a live writer having set up the shm.
-        let tmp = fm.temporaryDirectory.appendingPathComponent("aiusage-db-\(getpid())", isDirectory: true)
-        try? fm.removeItem(at: tmp)
-        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: tmp) }
-        for suffix in ["", "-wal", "-shm"] {
-            let s = src + suffix
-            if fm.fileExists(atPath: s) {
-                try? fm.copyItem(atPath: s, toPath: tmp.appendingPathComponent("stats.db" + suffix).path)
+        let (events, offsets) = try withSQLiteCopy(of: src, label: "gjc") { db in
+            var stmt: OpaquePointer?
+            var hasProvider = true
+            let sql = "SELECT timestamp, model, total_tokens, cost_total, provider FROM messages"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+                hasProvider = false
+                let legacy = "SELECT timestamp, model, total_tokens, cost_total FROM messages"
+                guard sqlite3_prepare_v2(db, legacy, -1, &stmt, nil) == SQLITE_OK else {
+                    throw StoreError.sqlite(String(cString: sqlite3_errmsg(db)))
+                }
             }
-        }
+            defer { sqlite3_finalize(stmt) }
 
-        var db: OpaquePointer?
-        let path = tmp.appendingPathComponent("stats.db").path
-        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
-            let msg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
-            sqlite3_close(db)
-            throw StoreError.sqlite(msg)
-        }
-        defer { sqlite3_close(db) }
-
-        var stmt: OpaquePointer?
-        var hasProvider = true
-        let sql = "SELECT timestamp, model, total_tokens, cost_total, provider FROM messages"
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
-            hasProvider = false
-            let legacy = "SELECT timestamp, model, total_tokens, cost_total FROM messages"
-            guard sqlite3_prepare_v2(db, legacy, -1, &stmt, nil) == SQLITE_OK else {
-                throw StoreError.sqlite(String(cString: sqlite3_errmsg(db)))
+            var events: [UsageEvent] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let tsMs = sqlite3_column_int64(stmt, 0)
+                guard let mPtr = sqlite3_column_text(stmt, 1) else { continue }
+                let model = String(cString: mPtr)
+                let tokens = Int(sqlite3_column_int64(stmt, 2))
+                let cost = sqlite3_column_double(stmt, 3)
+                let provider = hasProvider
+                    ? sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? ""
+                    : ""
+                events.append(UsageEvent(
+                    ts: Date(timeIntervalSince1970: Double(tsMs) / 1000),
+                    model: model, tokens: tokens, cost: cost, provider: provider
+                ))
             }
-        }
-        defer { sqlite3_finalize(stmt) }
 
-        var events: [UsageEvent] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let tsMs = sqlite3_column_int64(stmt, 0)
-            guard let mPtr = sqlite3_column_text(stmt, 1) else { continue }
-            let model = String(cString: mPtr)
-            let tokens = Int(sqlite3_column_int64(stmt, 2))
-            let cost = sqlite3_column_double(stmt, 3)
-            let provider = hasProvider
-                ? sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? ""
-                : ""
-            events.append(UsageEvent(
-                ts: Date(timeIntervalSince1970: Double(tsMs) / 1000),
-                model: model, tokens: tokens, cost: cost, provider: provider
-            ))
+            var offsets: [String: UInt64] = [:]
+            var offStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT session_file, offset FROM file_offsets", -1, &offStmt, nil) == SQLITE_OK {
+                while sqlite3_step(offStmt) == SQLITE_ROW {
+                    if let p = sqlite3_column_text(offStmt, 0) {
+                        offsets[String(cString: p)] = UInt64(sqlite3_column_int64(offStmt, 1))
+                    }
+                }
+            }
+            sqlite3_finalize(offStmt)
+            return (events, offsets)
         }
         // stats.db is a cache that gjc refreshes only occasionally, so it can
         // lag live usage by days. Parse whatever each session log appended past
         // the recorded ingestion offset so today/week/session include current use.
-        var offsets: [String: UInt64] = [:]
-        var offStmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT session_file, offset FROM file_offsets", -1, &offStmt, nil) == SQLITE_OK {
-            while sqlite3_step(offStmt) == SQLITE_ROW {
-                if let p = sqlite3_column_text(offStmt, 0) {
-                    offsets[String(cString: p)] = UInt64(sqlite3_column_int64(offStmt, 1))
-                }
-            }
-        }
-        sqlite3_finalize(offStmt)
-
         return events + loadGJCSessionEvents(root: sessionsRoot, offsets: offsets)
     }
 
@@ -504,6 +517,277 @@ final class UsageStore: ObservableObject {
         return Array(byID.values) + anonymous
     }
 
+    // MARK: - Cursor agent transcripts
+
+    /// Parses `~/.cursor/projects/**/agent-transcripts/**` — conversation
+    /// transcripts written by cursor-agent (Cursor CLI and the IDE's background
+    /// agents). Cursor records no token counts locally, so tokens are estimated
+    /// from text length (~4 chars/token) and cost from those estimates. The
+    /// model comes from Cursor's ai-code-tracking.db summaries when present,
+    /// and every turn in a session shares the session's last-update timestamp
+    /// (per-turn timestamps don't exist either).
+    static func loadCursorSessions() -> [UsageEvent] {
+        let fm = FileManager.default
+        let root = SnapshotIO.realHome + "/.cursor/projects"
+        guard let en = fm.enumerator(atPath: root) else { return [] }
+
+        let summaries = loadCursorSummaries()
+
+        // Composer-2 sessions ship a .jsonl and sometimes a .txt render of the
+        // same turns; prefer the jsonl and drop its .txt twin.
+        var rels: [String] = []
+        var jsonlStems = Set<String>()
+        for case let rel as String in en where rel.contains("agent-transcripts/") {
+            if rel.hasSuffix(".jsonl") {
+                rels.append(rel)
+                jsonlStems.insert(String(rel.dropLast(6)))
+            } else if rel.hasSuffix(".txt") {
+                rels.append(rel)
+            }
+        }
+
+        var events: [UsageEvent] = []
+        for rel in rels {
+            if rel.hasSuffix(".txt"), jsonlStems.contains(String(rel.dropLast(4))) { continue }
+            let path = root + "/" + rel
+            guard let data = fm.contents(atPath: path),
+                  let text = String(data: data, encoding: .utf8) else { continue }
+
+            let stem = ((rel as NSString).lastPathComponent as NSString).deletingPathExtension
+            let summary = summaries[stem]
+            let model = summary?.model ?? "cursor-auto"
+            let ts = summary?.updatedAt
+                ?? ((try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date)
+                ?? Date()
+
+            let turns = rel.hasSuffix(".jsonl") ? cursorJSONLTurns(text) : cursorTextTurns(text)
+            for t in turns {
+                let input = t.inputChars / 4
+                let output = t.outputChars / 4
+                guard input + output > 0 else { continue }
+                let cost = estimateCost(model: model, input: input, output: output,
+                                        cacheRead: 0, cacheWrite: 0)
+                events.append(UsageEvent(ts: ts, model: model, tokens: input + output,
+                                         cost: cost, provider: "cursor"))
+            }
+        }
+        return events
+    }
+
+    private struct CursorSummary {
+        var model: String?
+        var updatedAt: Date?
+    }
+
+    /// Conversation metadata Cursor keeps in ai-code-tracking.db, keyed by the
+    /// transcript's filename stem (conversationId).
+    private static func loadCursorSummaries() -> [String: CursorSummary] {
+        let src = SnapshotIO.realHome + "/.cursor/ai-tracking/ai-code-tracking.db"
+        guard FileManager.default.fileExists(atPath: src) else { return [:] }
+        return (try? withSQLiteCopy(of: src, label: "cursor") { db in
+            var stmt: OpaquePointer?
+            let sql = "SELECT conversationId, model, updatedAt FROM conversation_summaries"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [:] }
+            defer { sqlite3_finalize(stmt) }
+            var out: [String: CursorSummary] = [:]
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let idPtr = sqlite3_column_text(stmt, 0) else { continue }
+                let ms = sqlite3_column_int64(stmt, 2)
+                out[String(cString: idPtr)] = CursorSummary(
+                    model: sqlite3_column_text(stmt, 1).map { String(cString: $0) },
+                    updatedAt: ms > 0 ? Date(timeIntervalSince1970: Double(ms) / 1000) : nil)
+            }
+            return out
+        }) ?? [:]
+    }
+
+    private struct CursorTurn {
+        var inputChars = 0
+        var outputChars = 0
+    }
+
+    /// JSONL transcript: `{role, message: {content: [{type: text|tool_use}]}}`.
+    private static func cursorJSONLTurns(_ text: String) -> [CursorTurn] {
+        var turns: [CursorTurn] = []
+        var pendingInput = 0
+        for line in text.split(separator: "\n") {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let role = obj["role"] as? String,
+                  let msg = obj["message"] as? [String: Any] else { continue }
+            let chars = (msg["content"] as? [[String: Any]] ?? []).reduce(0) { sum, block in
+                (block["type"] as? String) == "text"
+                    ? sum + ((block["text"] as? String)?.count ?? 0) : sum
+            }
+            if role == "user" {
+                pendingInput += chars
+            } else if role == "assistant" {
+                turns.append(CursorTurn(inputChars: pendingInput, outputChars: chars))
+                pendingInput = 0
+            }
+        }
+        return turns
+    }
+
+    /// Legacy text transcript: "user: ..." / "A: ..." blocks with [Thinking],
+    /// [Tool call], [Tool result] markers. Tool lines carry no model text and
+    /// are skipped; [Thinking] lines are reasoning output and count.
+    private static func cursorTextTurns(_ text: String) -> [CursorTurn] {
+        var turns: [CursorTurn] = []
+        var pendingInput = 0
+        var chars = 0
+        var mode = 0   // 0 none, 1 user, 2 assistant
+        func flush() {
+            if mode == 1 { pendingInput += chars }
+            if mode == 2 {
+                turns.append(CursorTurn(inputChars: pendingInput, outputChars: chars))
+                pendingInput = 0
+            }
+            chars = 0
+        }
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.lowercased().hasPrefix("user:") {
+                flush(); mode = 1; chars = line.count - 5
+            } else if line.hasPrefix("A:") {
+                flush(); mode = 2; chars = line.count - 2
+            } else if mode == 2, line.hasPrefix("[Tool call]") || line.hasPrefix("[Tool result]") {
+                continue
+            } else if mode != 0 {
+                chars += line.count
+            }
+        }
+        flush()
+        return turns
+    }
+
+    // MARK: - Grok (~/.grok)
+
+    /// Grok usage exists in two layouts under `~/.grok`, depending on the CLI:
+    /// the open-source grok-cli logs real token counts into `grok.db`
+    /// (`usage_events` table, WAL SQLite), while xAI's Grok Build keeps
+    /// per-session ACP logs under `sessions/<cwd>/<uuid>/` with no token
+    /// accounting — those are estimated from the running context-size curve.
+    /// Both are read; either may be absent.
+    static func loadGrokUsage() throws -> [UsageEvent] {
+        var events: [UsageEvent] = []
+        let db = SnapshotIO.realHome + "/.grok/grok.db"
+        if FileManager.default.fileExists(atPath: db) {
+            events = try loadGrokDB(db)
+        }
+        return events + loadGrokBuildSessions()
+    }
+
+    private static func loadGrokDB(_ src: String) throws -> [UsageEvent] {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+        return try withSQLiteCopy(of: src, label: "grok") { db in
+            var stmt: OpaquePointer?
+            let sql = "SELECT created_at, model, input_tokens, output_tokens, total_tokens, cost_micros FROM usage_events"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw StoreError.sqlite(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+            var events: [UsageEvent] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let tsPtr = sqlite3_column_text(stmt, 0) else { continue }
+                let tsStr = String(cString: tsPtr)
+                guard let ts = iso.date(from: tsStr) ?? isoPlain.date(from: tsStr) else { continue }
+                let model = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "grok"
+                let input = Int(sqlite3_column_int64(stmt, 2))
+                let output = Int(sqlite3_column_int64(stmt, 3))
+                let tokens = max(Int(sqlite3_column_int64(stmt, 4)), input + output)
+                guard tokens > 0 else { continue }
+                let micros = sqlite3_column_double(stmt, 5)
+                let cost = micros > 0
+                    ? micros / 1_000_000    // cost_micros is micro-dollars
+                    : estimateCost(model: model, input: input, output: output,
+                                   cacheRead: 0, cacheWrite: 0)
+                events.append(UsageEvent(ts: ts, model: model, tokens: tokens,
+                                         cost: cost, provider: "xai"))
+            }
+            return events
+        }
+    }
+
+    /// One estimated event per Grok Build session: `updates.jsonl` carries a
+    /// running `_meta.totalTokens` per streamed chunk but no billable split.
+    /// Each turn (promptId) re-sends the grown context, so the unique context
+    /// (peak summed per compaction segment) counts once as fresh input, the
+    /// re-sent remainder as cache reads, and per-turn growth as output.
+    private static func loadGrokBuildSessions() -> [UsageEvent] {
+        let fm = FileManager.default
+        let root = SnapshotIO.realHome + "/.grok/sessions"
+        guard let cwds = try? fm.contentsOfDirectory(atPath: root) else { return [] }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+
+        var events: [UsageEvent] = []
+        for cwd in cwds {
+            let cwdPath = root + "/" + cwd
+            guard let sessions = try? fm.contentsOfDirectory(atPath: cwdPath) else { continue }
+            for session in sessions {
+                let dir = cwdPath + "/" + session
+                guard let sumData = fm.contents(atPath: dir + "/summary.json"),
+                      let summary = try? JSONSerialization.jsonObject(with: sumData) as? [String: Any],
+                      let updData = fm.contents(atPath: dir + "/updates.jsonl"),
+                      let updates = String(data: updData, encoding: .utf8) else { continue }
+
+                let (input, cacheRead, output) = grokBuildTokens(updates)
+                guard input + output > 0 else { continue }
+
+                let model = summary["current_model_id"] as? String ?? "grok"
+                let tsStr = (summary["updated_at"] as? String)
+                    ?? (summary["last_active_at"] as? String)
+                    ?? (summary["created_at"] as? String) ?? ""
+                let ts = iso.date(from: tsStr) ?? isoPlain.date(from: tsStr)
+                    ?? ((try? fm.attributesOfItem(atPath: dir + "/updates.jsonl"))?[.modificationDate] as? Date)
+                    ?? Date()
+                let cost = estimateCost(model: model, input: input, output: output,
+                                        cacheRead: cacheRead, cacheWrite: 0)
+                events.append(UsageEvent(ts: ts, model: model,
+                                         tokens: input + cacheRead + output,
+                                         cost: cost, provider: "xai"))
+            }
+        }
+        return events
+    }
+
+    private static func grokBuildTokens(_ text: String) -> (input: Int, cacheRead: Int, output: Int) {
+        var turns: [String: (first: Int, last: Int)] = [:]
+        var prevTotal = -1
+        var segmentPeak = 0
+        var inputFresh = 0
+        for line in text.split(separator: "\n") {
+            guard line.contains("\"totalTokens\""),
+                  let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let params = obj["params"] as? [String: Any],
+                  let meta = params["_meta"] as? [String: Any],
+                  let total = meta["totalTokens"] as? Int else { continue }
+            // A big drop means the context was compacted; close the segment so
+            // pre-compaction context still counts as fresh input.
+            if prevTotal >= 0, total < prevTotal / 2 {
+                inputFresh += segmentPeak
+                segmentPeak = 0
+            }
+            segmentPeak = max(segmentPeak, total)
+            prevTotal = total
+            if let promptId = meta["promptId"] as? String {
+                if var t = turns[promptId] { t.last = total; turns[promptId] = t }
+                else { turns[promptId] = (total, total) }
+            }
+        }
+        inputFresh += segmentPeak
+        var sumFirst = 0, output = 0
+        for t in turns.values {
+            sumFirst += t.first
+            output += max(0, t.last - t.first)
+        }
+        return (inputFresh, max(0, sumFirst - inputFresh), output)
+    }
+
     /// Rough public API pricing per million tokens, matched by model family substring.
     static func estimateCost(model: String, input: Int, output: Int, cacheRead: Int, cacheWrite: Int) -> Double {
         let m = model.lowercased()
@@ -515,6 +799,14 @@ final class UsageStore: ObservableObject {
         else if m.contains("gemini") {
             (i, o, cr, cw) = m.contains("flash") ? (0.3, 2.5, 0.03, 0)
                                                  : (1.25, 10, 0.125, 0)      // pro
+        }
+        else if m.contains("grok") {
+            (i, o, cr, cw) = m.contains("mini") ? (0.3, 0.5, 0.03, 0)
+                           : m.contains("4.20") ? (2, 6, 0.2, 0)
+                                                : (1.25, 2.5, 0.125, 0)      // grok-4 family
+        }
+        else if m.contains("composer") || m.contains("cursor") {
+            (i, o, cr, cw) = (1.25, 10, 0.125, 0)                            // cursor composer
         }
         else if m.contains("opus") { (i, o, cr, cw) = (15, 75, 1.5, 18.75) }
         else if m.contains("haiku") { (i, o, cr, cw) = (0.8, 4, 0.08, 1) }

@@ -264,6 +264,8 @@ struct MenuBarGlyph: View {
         case .claude: ProviderIcon(kind: .claude, size: size, color: color)
         case .gpt: ProviderIcon(kind: .gpt, size: size, color: color)
         case .gemini: ProviderIcon(kind: .gemini, size: size, color: color)
+        case .cursor: ProviderIcon(kind: .cursor, size: size, color: color)
+        case .grok: ProviderIcon(kind: .grok, size: size, color: color)
         case .chart: ProviderIcon(kind: .generic, size: size, color: color)
         }
     }

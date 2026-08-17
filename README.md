@@ -1,12 +1,12 @@
 # AI 노동청
 
-내 AI가 노동착취를 얼마나 당했는지 확인할 수 있는 앱. Claude(GJC·Claude Code)·GPT(Codex CLI)·Gemini(Gemini CLI) 사용량을 보여주는 macOS 메뉴바 앱 + WidgetKit 위젯이며, Xcode 프로젝트 없이 `swiftc`로 빌드합니다.
+내 AI가 노동착취를 얼마나 당했는지 확인할 수 있는 앱. Claude(GJC·Claude Code)·GPT(Codex CLI)·Gemini(Gemini CLI)·Cursor·Grok 사용량을 보여주는 macOS 메뉴바 앱 + WidgetKit 위젯이며, Xcode 프로젝트 없이 `swiftc`로 빌드합니다.
 
 ## 기능
 
-- **AI 연결**: 첫 실행 시 연결 메뉴가 자동으로 열립니다. Claude Code·GJC·Codex CLI·Gemini CLI 중 원하는 소스를 연결하고, 연결할 때 아이콘 색을 고를 수 있습니다(기본 민트). 연결 관리(추가/해제)는 팝오버의 "AI 연결" 섹션에 항상 있습니다.
+- **AI 연결**: 첫 실행 시 연결 메뉴가 자동으로 열립니다. Claude Code·GJC·Codex CLI·Gemini CLI·Cursor·Grok 중 원하는 소스를 연결하고, 연결할 때 아이콘 색을 고를 수 있습니다(기본 민트). 연결 관리(추가/해제)는 팝오버의 "AI 연결" 섹션에 항상 있습니다.
 - **메뉴바**: 연결한 AI마다 아이콘이 하나씩 생깁니다. 각 아이콘은 글리프가 해당 AI의 사용률만큼 아래에서 위로 채워지는 게이지입니다(100% = 완전히 채워진 아이콘). 기본 모양은 AI 노동청 앱 아이콘(스플랫) 실루엣입니다.
-- **아이콘 설정**: 아이콘별로 모양(앱 아이콘/자동 프로바이더 감지/Claude/GPT/Gemini/차트), 색, 채움 기준(세션/오늘/주간 사용량)을 팝오버에서 변경할 수 있습니다.
+- **아이콘 설정**: 아이콘별로 모양(앱 아이콘/자동 프로바이더 감지/Claude/GPT/Gemini/Cursor/Grok/차트), 색, 채움 기준(세션/오늘/주간 사용량)을 팝오버에서 변경할 수 있습니다.
 - **사용률(%) 기준**: 세션·주간은 **프로바이더가 실제 적용하는 한도**(100% = 한도 소진)를 그대로 씁니다 — Claude는 Anthropic의 5시간·7일 한도, Codex는 ChatGPT 플랜의 5시간·주간 한도(Codex CLI가 로그에 남긴 공식 수치). 한도를 읽지 못할 때(예: Gemini)만 역대 최대 기록 대비로 되돌아가고, 오늘은 항상 최고 일간 대비입니다.
 - **팝오버**: 아이콘을 클릭하면 해당 AI의 통계가 열립니다 — 요약 카드(세션·주간 링 게이지에 한도 소진율과 초기화까지 남은 시간), 모델별 사용량 바, 깃허브 스타일 기여 히트맵, 아이콘 설정, AI 연결 관리
 - **위젯 4종**: 기여 그래프(중/대), 요약(소/중), 모델별(소/중), 세션 링 게이지(소)
@@ -22,10 +22,12 @@
 | Claude Code | `~/.claude/projects/**/*.jsonl` | assistant 메시지 usage 파싱, `costUSD` 없으면 공개 단가로 추정 |
 | Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` | `token_count` 이벤트의 `last_token_usage` 합산. 세션 폴더가 수 GB까지 자라므로 파일 크기 기준 캐시로 변경분만 재파싱 |
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` | "gemini" 메시지의 `tokens`·`model` 파싱 (chats/ 하위 체크포인트 사본은 중복이라 제외) |
+| Cursor | `~/.cursor/projects/**/agent-transcripts/**` | cursor-agent(Cursor CLI·IDE 백그라운드 에이전트) 대화 트랜스크립트 파싱. Cursor는 토큰 수를 로컬에 남기지 않아 텍스트 길이(약 4자/토큰)로 **추정**하고, 모델·시각은 `~/.cursor/ai-tracking/ai-code-tracking.db`의 대화 요약에서 보충(없으면 auto·파일 mtime) |
+| Grok | `~/.grok/grok.db` + `~/.grok/sessions/**/updates.jsonl` | grok-cli는 `usage_events` 테이블의 실제 토큰·비용(`cost_micros`)을 읽고, xAI Grok Build는 토큰을 기록하지 않아 ACP 로그의 `_meta.totalTokens` 곡선에서 컴팩션 구간별 피크·턴별 증가량으로 **추정** |
 | Claude 한도(5h/7d) | 자체 연결 계정 → `~/.gjc/agent/agent.db` → Claude Code 키체인/`~/.claude/.credentials.json` | `/api/oauth/usage`를 GET — 유효한 액세스 토큰을 위 순서로 찾아 첫 번째로 응답하는 토큰을 씁니다. 자체 연결 계정의 토큰만 앱이 직접 리프레시하고, CLI 토큰은 읽기 전용(리프레시 토큰은 회전되므로 건드리면 CLI 로그인이 깨질 수 있음). 전부 만료면 gjc 캐시 리포트로 폴백하고 UI에 "N시간 전 기준"을 표시합니다 |
 | GPT 한도(5h/주간) | Codex CLI 롤아웃 로그의 `rate_limits` | ChatGPT 플랜 한도의 `used_percent`를 그대로 사용(프로바이더 공식 수치). Codex 실행 시에만 갱신되므로 오래되면 "N시간 전 기준"을 표시하고, 이미 초기화 시각이 지난 창은 버립니다 |
 
-비용·토큰은 로컬 로그에서 집계하지만 **한도 소진율은 로컬 로그로 재현할 수 없습니다** — 한도를 재는 단위가 달러가 아니고 플랜 상한도 디스크에 없기 때문입니다. 그래서 이 값만 프로바이더가 알려주는 수치를 그대로 씁니다. Claude 5h/7d 한도는 Anthropic 계정 단위로 공유되므로 Claude Code·GJC 연결 모두에 동일하게 적용되고, GPT 한도는 Codex 연결에 적용됩니다. Gemini는 읽을 수 있는 공식 한도가 없어 역대 기록 대비로만 표시합니다.
+비용·토큰은 로컬 로그에서 집계하지만 **한도 소진율은 로컬 로그로 재현할 수 없습니다** — 한도를 재는 단위가 달러가 아니고 플랜 상한도 디스크에 없기 때문입니다. 그래서 이 값만 프로바이더가 알려주는 수치를 그대로 씁니다. Claude 5h/7d 한도는 Anthropic 계정 단위로 공유되므로 Claude Code·GJC 연결 모두에 동일하게 적용되고, GPT 한도는 Codex 연결에 적용됩니다. Gemini·Cursor·Grok은 읽을 수 있는 공식 한도가 없어 역대 기록 대비로만 표시합니다.
 
 앱이 60초마다 집계해 `~/Library/Application Support/AIUsage/`에 `snapshot.json`(합산, 구버전 호환)과 `widget-data.json`(합산+소스별), `widget-config.json`(위젯 설정)을 저장하고, 위젯은 이 파일들만 읽습니다(샌드박스 read-only 예외). 계정을 연결하면 같은 폴더의 `oauth.json`(0600)에 자체 토큰이 저장됩니다.
 
@@ -62,10 +64,10 @@
 ```
 Sources/
   Shared/   Models.swift(데이터 모델·포맷·스냅샷/위젯 설정 IO), Heatmap.swift(히트맵 캔버스),
-            ProviderIcon.swift(Claude/GPT/Gemini 글리프·링 게이지)
+            ProviderIcon.swift(Claude/GPT/Gemini/Cursor/Grok 글리프·링 게이지)
   App/      AIUsageApp.swift(NSStatusItem+NSPopover, 연결별 아이콘, ASCII 번들명 마이그레이션),
             Connections.swift(AI 연결 모델), PopoverView.swift,
-            UsageStore.swift(수집·집계 — GJC/Claude Code/Codex/Gemini 로더),
+            UsageStore.swift(수집·집계 — GJC/Claude Code/Codex/Gemini/Cursor/Grok 로더),
             RateLimitProbe.swift(Claude 5h/7d 한도 조회),
             AccountAuth.swift(계정 연결·자체 OAuth 토큰),
             OAuthCallbackServer.swift(localhost:54545 로그인 콜백 수신),

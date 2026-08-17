@@ -9,6 +9,8 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
     case gjc          // ~/.gjc/stats.db
     case codex        // ~/.codex/sessions/**/*.jsonl
     case gemini       // ~/.gemini/tmp/*/chats/session-*.json
+    case cursor       // ~/.cursor/projects/**/agent-transcripts/**
+    case grok         // ~/.grok/grok.db + ~/.grok/sessions/**
 
     var id: String { rawValue }
 
@@ -18,6 +20,8 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
         case .gjc: return "GJC"
         case .codex: return "Codex CLI"
         case .gemini: return "Gemini CLI"
+        case .cursor: return "Cursor"
+        case .grok: return "Grok"
         }
     }
 
@@ -27,6 +31,8 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
         case .gjc: return "~/.gjc/stats.db"
         case .codex: return "~/.codex/sessions"
         case .gemini: return "~/.gemini/tmp"
+        case .cursor: return "~/.cursor/projects"
+        case .grok: return "~/.grok"
         }
     }
 
@@ -38,6 +44,10 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
         case .gjc: return fm.fileExists(atPath: SnapshotIO.realHome + "/.gjc/stats.db")
         case .codex: return fm.fileExists(atPath: SnapshotIO.realHome + "/.codex/sessions")
         case .gemini: return fm.fileExists(atPath: SnapshotIO.realHome + "/.gemini/tmp")
+        case .cursor: return fm.fileExists(atPath: SnapshotIO.realHome + "/.cursor/projects")
+        case .grok:
+            return fm.fileExists(atPath: SnapshotIO.realHome + "/.grok/grok.db")
+                || fm.fileExists(atPath: SnapshotIO.realHome + "/.grok/sessions")
         }
     }
 
@@ -48,6 +58,8 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
         case .gjc: return .generic
         case .codex: return .gpt
         case .gemini: return .gemini
+        case .cursor: return .cursor
+        case .grok: return .grok
         }
     }
 }
@@ -57,7 +69,7 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
 /// Shape drawn in the menu bar for a connection. `.app` — the AI 노동청
 /// starburst splat — is the default; `.auto` follows the detected provider.
 enum IconStyle: String, CaseIterable, Identifiable {
-    case app, auto, claude, gpt, gemini, chart
+    case app, auto, claude, gpt, gemini, cursor, grok, chart
 
     var id: String { rawValue }
 
@@ -68,6 +80,8 @@ enum IconStyle: String, CaseIterable, Identifiable {
         case .claude: return "Claude"
         case .gpt: return "GPT"
         case .gemini: return "Gemini"
+        case .cursor: return "Cursor"
+        case .grok: return "Grok"
         case .chart: return "차트"
         }
     }
