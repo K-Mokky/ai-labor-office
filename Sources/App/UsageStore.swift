@@ -664,17 +664,96 @@ final class UsageStore: ObservableObject {
 
     /// Grok usage exists in two layouts under `~/.grok`, depending on the CLI:
     /// the open-source grok-cli logs real token counts into `grok.db`
-    /// (`usage_events` table, WAL SQLite), while xAI's Grok Build keeps
-    /// per-session ACP logs under `sessions/<cwd>/<uuid>/` with no token
-    /// accounting — those are estimated from the running context-size curve.
-    /// Both are read; either may be absent.
+    /// (`usage_events` table, WAL SQLite), while xAI Grok Build writes
+    /// official per-inference counts to `logs/unified.jsonl`. Sessions that
+    /// never appear in those logs (rotated away, or older builds) fall back
+    /// to estimating from the `_meta.totalTokens` curve in `updates.jsonl`.
     static func loadGrokUsage() throws -> [UsageEvent] {
         var events: [UsageEvent] = []
         let db = SnapshotIO.realHome + "/.grok/grok.db"
         if FileManager.default.fileExists(atPath: db) {
             events = try loadGrokDB(db)
         }
-        return events + loadGrokBuildSessions()
+        let official = loadGrokOfficialLogs()
+        events += official.events
+        events += loadGrokBuildSessions(excluding: official.sessions)
+        return events
+    }
+
+    /// `shell.turn.inference_done` lines from Grok Build. `prompt_tokens`
+    /// already includes the cache hit; `completion_tokens` includes reasoning.
+    private static func loadGrokOfficialLogs() -> (events: [UsageEvent], sessions: Set<String>) {
+        let fm = FileManager.default
+        let logDir = SnapshotIO.realHome + "/.grok/logs"
+        guard let names = try? fm.contentsOfDirectory(atPath: logDir) else {
+            return ([], [])
+        }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+        let models = grokSessionModels()
+
+        var events: [UsageEvent] = []
+        var sessions: Set<String> = []
+        for name in names where name.hasSuffix(".jsonl") {
+            guard let data = fm.contents(atPath: logDir + "/" + name),
+                  let text = String(data: data, encoding: .utf8) else { continue }
+            for line in text.split(separator: "\n") {
+                guard line.contains("inference_done"),
+                      line.contains("prompt_tokens"),
+                      let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      obj["msg"] as? String == "shell.turn.inference_done",
+                      let ctx = obj["ctx"] as? [String: Any] else { continue }
+
+                let prompt = jsonInt(ctx["prompt_tokens"])
+                let cached = min(jsonInt(ctx["cached_prompt_tokens"]), prompt)
+                let output = jsonInt(ctx["completion_tokens"])
+                let tokens = prompt + output
+                guard tokens > 0 else { continue }
+
+                let tsStr = obj["ts"] as? String ?? ""
+                let ts = iso.date(from: tsStr) ?? isoPlain.date(from: tsStr) ?? Date()
+                let sid = obj["sid"] as? String ?? ""
+                if !sid.isEmpty { sessions.insert(sid) }
+                let model = models[sid] ?? "grok"
+                let cost = estimateCost(model: model,
+                                        input: max(0, prompt - cached),
+                                        output: output,
+                                        cacheRead: cached,
+                                        cacheWrite: 0)
+                events.append(UsageEvent(ts: ts, model: model, tokens: tokens,
+                                         cost: cost, provider: "xai"))
+            }
+        }
+        return (events, sessions)
+    }
+
+    private static func grokSessionModels() -> [String: String] {
+        let fm = FileManager.default
+        let root = SnapshotIO.realHome + "/.grok/sessions"
+        guard let cwds = try? fm.contentsOfDirectory(atPath: root) else { return [:] }
+        var models: [String: String] = [:]
+        for cwd in cwds {
+            let cwdPath = root + "/" + cwd
+            guard let sessions = try? fm.contentsOfDirectory(atPath: cwdPath) else { continue }
+            for session in sessions {
+                guard let data = fm.contents(atPath: cwdPath + "/" + session + "/summary.json"),
+                      let summary = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let model = summary["current_model_id"] as? String,
+                      !model.isEmpty else { continue }
+                models[session] = model
+            }
+        }
+        return models
+    }
+
+    private static func jsonInt(_ any: Any?) -> Int {
+        if let i = any as? Int { return i }
+        if let n = any as? NSNumber { return n.intValue }
+        if let d = any as? Double { return Int(d) }
+        if let s = any as? String { return Int(s) ?? 0 }
+        return 0
     }
 
     private static func loadGrokDB(_ src: String) throws -> [UsageEvent] {
@@ -710,12 +789,14 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    /// One estimated event per Grok Build session: `updates.jsonl` carries a
-    /// running `_meta.totalTokens` per streamed chunk but no billable split.
-    /// Each turn (promptId) re-sends the grown context, so the unique context
-    /// (peak summed per compaction segment) counts once as fresh input, the
-    /// re-sent remainder as cache reads, and per-turn growth as output.
-    private static func loadGrokBuildSessions() -> [UsageEvent] {
+    /// Fallback for Grok Build sessions that never got an official
+    /// `inference_done` line. `updates.jsonl` carries a running
+    /// `_meta.totalTokens` per streamed chunk but no billable split.
+    /// Each turn (promptId) re-sends the grown context, so the unique
+    /// context (peak summed per compaction segment) counts once as
+    /// fresh input, the re-sent remainder as cache reads, and per-turn
+    /// growth as output.
+    private static func loadGrokBuildSessions(excluding covered: Set<String> = []) -> [UsageEvent] {
         let fm = FileManager.default
         let root = SnapshotIO.realHome + "/.grok/sessions"
         guard let cwds = try? fm.contentsOfDirectory(atPath: root) else { return [] }
@@ -729,6 +810,7 @@ final class UsageStore: ObservableObject {
             let cwdPath = root + "/" + cwd
             guard let sessions = try? fm.contentsOfDirectory(atPath: cwdPath) else { continue }
             for session in sessions {
+                if covered.contains(session) { continue }
                 let dir = cwdPath + "/" + session
                 guard let sumData = fm.contents(atPath: dir + "/summary.json"),
                       let summary = try? JSONSerialization.jsonObject(with: sumData) as? [String: Any],

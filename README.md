@@ -23,7 +23,7 @@
 | Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` | `token_count` 이벤트의 `last_token_usage` 합산. 세션 폴더가 수 GB까지 자라므로 파일 크기 기준 캐시로 변경분만 재파싱 |
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` | "gemini" 메시지의 `tokens`·`model` 파싱 (chats/ 하위 체크포인트 사본은 중복이라 제외) |
 | Cursor | `~/.cursor/projects/**/agent-transcripts/**` | cursor-agent(Cursor CLI·IDE 백그라운드 에이전트) 대화 트랜스크립트 파싱. Cursor는 토큰 수를 로컬에 남기지 않아 텍스트 길이(약 4자/토큰)로 **추정**하고, 모델·시각은 `~/.cursor/ai-tracking/ai-code-tracking.db`의 대화 요약에서 보충(없으면 auto·파일 mtime) |
-| Grok | `~/.grok/grok.db` + `~/.grok/sessions/**/updates.jsonl` | grok-cli는 `usage_events` 테이블의 실제 토큰·비용(`cost_micros`)을 읽고, xAI Grok Build는 토큰을 기록하지 않아 ACP 로그의 `_meta.totalTokens` 곡선에서 컴팩션 구간별 피크·턴별 증가량으로 **추정** |
+| Grok | `~/.grok/grok.db` + `~/.grok/logs/unified.jsonl` | grok-cli는 `usage_events` 테이블의 실제 토큰·비용(`cost_micros`)을 읽고, xAI Grok Build는 `logs/unified.jsonl`의 `shell.turn.inference_done`(`prompt_tokens`·`cached_prompt_tokens`·`completion_tokens`)을 합산. 로그가 없는 세션만 ACP `updates.jsonl`의 `_meta.totalTokens` 곡선에서 컴팩션 구간별 피크·턴별 증가량으로 **추정** |
 | Claude 한도(5h/7d) | 자체 연결 계정 → `~/.gjc/agent/agent.db` → Claude Code 키체인/`~/.claude/.credentials.json` | `/api/oauth/usage`를 GET — 유효한 액세스 토큰을 위 순서로 찾아 첫 번째로 응답하는 토큰을 씁니다. 자체 연결 계정의 토큰만 앱이 직접 리프레시하고, CLI 토큰은 읽기 전용(리프레시 토큰은 회전되므로 건드리면 CLI 로그인이 깨질 수 있음). 전부 만료면 gjc 캐시 리포트로 폴백하고 UI에 "N시간 전 기준"을 표시합니다 |
 | GPT 한도(5h/주간) | Codex CLI 롤아웃 로그의 `rate_limits` | ChatGPT 플랜 한도의 `used_percent`를 그대로 사용(프로바이더 공식 수치). Codex 실행 시에만 갱신되므로 오래되면 "N시간 전 기준"을 표시하고, 이미 초기화 시각이 지난 창은 버립니다 |
 
