@@ -15,6 +15,7 @@ final class UsageStore: ObservableObject {
     @Published var connections: [AIConnection]
     @Published var snapshots: [String: UsageSnapshot] = [:]  // connection id → snapshot
     @Published var combined: UsageSnapshot?                  // all connections (widgets)
+    @Published var grokBilling: GrokBilling?                 // xAI billing meter (grok only)
     @Published var lastError: String?
     @Published var lastRefresh: Date?
 
@@ -92,8 +93,17 @@ final class UsageStore: ObservableObject {
             }
 
             let now = Date()
-            // Provider-enforced 5h/7d quotas; empty when unreadable.
-            let claudeLimits = RateLimitProbe.fetch()
+            // Provider-enforced 5h/7d quotas — only worth the network round-trip
+            // (and the Keychain/agent.db reads it does) when a Claude-backed
+            // connection can actually display them. A grok/gemini/cursor-only
+            // setup skipped this and stopped probing Anthropic every 60s.
+            let wantsClaudeQuota = conns.contains {
+                $0.source == .claudeCode || $0.source == .gjc
+            }
+            let claudeLimits = wantsClaudeQuota ? RateLimitProbe.fetch() : []
+            // Grok's official billing meter, only when a Grok connection wants it.
+            let grokBilling = conns.contains { $0.source == .grok }
+                ? GrokUsageProbe.fetch() : nil
             var snaps: [String: UsageSnapshot] = [:]
             for c in conns {
                 snaps[c.id] = Self.aggregate(events: bySource[c.source] ?? [],
@@ -115,6 +125,7 @@ final class UsageStore: ObservableObject {
                 self.refreshInFlight = false
                 self.snapshots = snaps
                 self.combined = combined
+                self.grokBilling = grokBilling
                 self.lastError = errors.isEmpty ? nil : errors.joined(separator: " / ")
                 self.lastRefresh = Date()
                 try? SnapshotIO.save(combined)          // legacy single-snapshot file
@@ -899,6 +910,23 @@ final class UsageStore: ObservableObject {
 
     // MARK: - Aggregation
 
+    /// The `ProviderKind` carrying the most cost across `events` (ties and an
+    /// all-zero-cost set fall back to event count, then `.generic`).
+    static func dominantProvider(_ events: [UsageEvent]) -> ProviderKind {
+        guard !events.isEmpty else { return .generic }
+        var costByKind: [ProviderKind: Double] = [:]
+        var countByKind: [ProviderKind: Int] = [:]
+        for e in events {
+            let kind = ProviderKind.detect(provider: e.provider, model: e.model)
+            costByKind[kind, default: 0] += Swift.max(e.cost, 0)
+            countByKind[kind, default: 0] += 1
+        }
+        if let best = costByKind.max(by: { $0.value < $1.value }), best.value > 0 {
+            return best.key
+        }
+        return countByKind.max(by: { $0.value < $1.value })?.key ?? .generic
+    }
+
     static func aggregate(events: [UsageEvent], now: Date = Date(),
                           claudeLimits: [LimitWindow] = [],
                           gptLimits: [LimitWindow] = []) -> UsageSnapshot {
@@ -971,8 +999,11 @@ final class UsageStore: ObservableObject {
         let sessionMaxCost = history.map(\.cost).max() ?? 0
         let sessionMaxTokens = history.map(\.tokens).max() ?? 0
 
-        let provider = ProviderKind.detect(provider: sorted.last?.provider,
-                                           model: sorted.last?.model)
+        // Attribute the quota to the provider that dominates this event set by
+        // cost, not merely whichever event happened most recently: one stray
+        // event of another provider must not flip which quota the snapshot
+        // reports (this matters most for the merged "all connections" view).
+        let provider = dominantProvider(events)
         // Quotas belong to the provider account and are shared by every client
         // billing to it: Anthropic's 5h/7d windows apply to any Claude-backed
         // connection, the ChatGPT plan windows to any GPT-backed one.

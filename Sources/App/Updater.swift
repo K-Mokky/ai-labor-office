@@ -52,10 +52,20 @@ final class Updater: ObservableObject {
         return false
     }
 
-    /// Auto-install newer releases (settings toggle, default on).
+    /// Auto-install newer releases (settings toggle, default **off**). When off
+    /// (the default), a new release only lights up the banner and waits for the
+    /// user to press 업데이트 — the app never quits itself. Users who opt in still
+    /// get the old download-and-relaunch behavior.
     var autoInstall: Bool {
-        UserDefaults.standard.object(forKey: "autoUpdate") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "autoUpdate") as? Bool ?? false
     }
+
+    /// Release tags already auto-installed this session. A bundle whose
+    /// CFBundleShortVersionString does not match the release tag would otherwise
+    /// look "outdated" right after updating, so an opted-in auto-install could
+    /// loop download → relaunch → download forever — the app appearing to quit
+    /// itself over and over. Installing each tag at most once breaks that loop.
+    private var autoInstalledTags: Set<String> = []
 
     private var isBusy: Bool {
         switch phase {
@@ -75,7 +85,10 @@ final class Updater: ObservableObject {
                 lastChecked = Date()
                 if let release, Self.isNewer(release.version, than: Self.currentVersion) {
                     phase = .available(release)
-                    if autoInstall { install(release) }
+                    if autoInstall, !autoInstalledTags.contains(release.tag) {
+                        autoInstalledTags.insert(release.tag)
+                        install(release)
+                    }
                 } else {
                     phase = .upToDate
                 }

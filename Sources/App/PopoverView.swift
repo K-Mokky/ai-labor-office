@@ -17,7 +17,7 @@ struct PopoverView: View {
     @ObservedObject var updater: Updater
     var connectionID: String? = nil          // nil → onboarding (no connections yet)
     @AppStorage("menuBarUnit") private var unitKey = "percent"
-    @AppStorage("autoUpdate") private var autoUpdate = true
+    @AppStorage("autoUpdate") private var autoUpdate = false
     @State private var launchAtLogin = LoginItem.isEnabled
     @State private var showSettings = false
     @StateObject private var widgetSettings = WidgetSettingsStore()
@@ -48,6 +48,7 @@ struct PopoverView: View {
                         connectSection
                     } else {
                         summaryCards
+                        grokLimitSection
                         modelSection
                         heatmapSection
                         if showSettings {
@@ -218,6 +219,57 @@ struct PopoverView: View {
     private func resetText(_ date: Date?) -> String {
         guard let date, date > Date() else { return "곧 초기화" }
         return "\(fmtRemaining(date)) 후 초기화"
+    }
+
+    // MARK: Grok billing (xAI official usage & limit)
+
+    /// Grok's official usage/limit, read live from xAI's billing meter. Shown
+    /// only for a Grok connection; the local logs already drive the cards above.
+    @ViewBuilder private var grokLimitSection: some View {
+        if connection?.source == .grok {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Grok 한도").font(.subheadline.bold())
+                    Spacer()
+                    Text("xAI 공식 청구").font(.caption2).foregroundStyle(.tertiary)
+                }
+                if let b = store.grokBilling {
+                    HStack(alignment: .center, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("이번 청구 기간 사용액").font(.caption).foregroundStyle(.secondary)
+                            Text(fmtCost(b.used)).font(.title3.bold()).monospacedDigit()
+                            if let end = b.periodEnd, end > Date() {
+                                Text("\(fmtRemaining(end)) 후 갱신")
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        if let f = b.fraction, let limit = b.effectiveLimit {
+                            VStack(alignment: .trailing, spacing: 3) {
+                                RingGauge(fraction: f, size: 34, lineWidth: 3.5,
+                                          tint: connection?.color ?? .accentColor, showLabel: true)
+                                Text("한도 \(fmtCost(limit))").font(.caption2).foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                    if b.onDemandCap > 0 {
+                        Text("추가 사용(on-demand) \(fmtCost(b.onDemandUsed)) / \(fmtCost(b.onDemandCap))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    if b.effectiveLimit == nil {
+                        Text("구독 요금제라 사용액 기준 한도는 없어요. 쿼리 횟수·리셋은 grok.com·앱 로그인 세션에서만 조회돼요.")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else {
+                    Text("grok CLI 토큰이 없거나 만료됐어요 — 터미널에서 grok을 한 번 실행하면 한도가 갱신돼요.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+        }
     }
 
     // MARK: Models
