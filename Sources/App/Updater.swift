@@ -112,11 +112,21 @@ final class Updater: ObservableObject {
               let tag = obj["tag_name"] as? String else { throw err("릴리스 응답을 읽지 못했습니다") }
         guard let version = parse(tag) else { throw err("버전 태그가 아닙니다: \(tag)") }
         let assets = obj["assets"] as? [[String: Any]] ?? []
-        let dmg = assets.compactMap { a -> URL? in
+        let dmgs: [(String, URL)] = assets.compactMap { a in
             guard let name = a["name"] as? String, name.hasSuffix(".dmg"),
-                  let s = a["browser_download_url"] as? String else { return nil }
-            return URL(string: s)
-        }.first
+                  let s = a["browser_download_url"] as? String,
+                  let url = URL(string: s) else { return nil }
+            return (name, url)
+        }
+        // Prefer the ASCII release name; older tags shipped AI-Nodongcheong-*.dmg.
+        let dmg = dmgs.min(by: { a, b in
+            func rank(_ name: String) -> Int {
+                if name.hasPrefix("AI-Labor-Office-") { return 0 }
+                if name.hasPrefix("AI-Nodongcheong-") { return 2 }
+                return 1
+            }
+            return rank(a.0) < rank(b.0)
+        })?.1
         guard let dmg else { throw err("릴리스 \(tag)에 .dmg 에셋이 없습니다") }
         return Release(tag: tag, version: version, dmgURL: dmg)
     }

@@ -37,8 +37,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ko.lproj" \
 
 echo "==> Compiling app"
 # 실행 파일명(CFBundleExecutable)은 ASCII 프로그램 이름이다
-# (Activity Monitor의 프로세스명). 한글 표시 이름은 CFBundleDisplayName/
-# CFBundleName = "AI 노동청"이 담당한다. 번들 폴더(AI Labor Office.app)는
+# (Activity Monitor의 프로세스명). 한글 표시 이름은 ko.lproj의
+# CFBundleDisplayName/CFBundleName = "AI 노동청"이 담당하고, 루트 Info.plist는
+# ASCII("AI Labor Office")로 둔다. 번들 폴더(AI Labor Office.app)는
 # 위젯 LaunchServices 등록 안정성을 위해 ASCII로 유지한다.
 swiftc -O -parse-as-library -target "$TARGET" \
   Sources/Shared/*.swift Sources/App/*.swift \
@@ -85,8 +86,11 @@ if [[ "${1:-}" == "install" ]]; then
   # 실행 중 인스턴스 종료 — 실행 파일명과 무관하게 번들 경로로 매칭.
   pkill -f "/Applications/AIUsage.app/Contents/MacOS" 2>/dev/null || true
   pkill -f "/Applications/AI Labor Office.app/Contents/MacOS" 2>/dev/null || true
+  pkill -x "AIUsage" 2>/dev/null || true
+  pkill -x "AI NoDongChung" 2>/dev/null || true
   # 구버전 번들 정리 — 한글 이름 번들은 위젯 등록이 깨지므로 LS 기록까지 지운다.
-  for old in "/Applications/AI 노동청.app" "/Applications/AI Usage.app" "/Applications/AIUsage.app"; do
+  for old in "/Applications/AI 노동청.app" "/Applications/AI Usage.app" \
+             "/Applications/AIUsage.app" "/Applications/AI NoDongChung.app"; do
     if [[ -d "$old" ]]; then
       "$LSREGISTER" -u "$old" >/dev/null 2>&1 || true
       rm -rf "$old"
