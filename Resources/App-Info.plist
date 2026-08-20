@@ -7,7 +7,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>AI 노동청</string>
 	<key>CFBundleExecutable</key>
-	<string>AIUsage</string>
+	<string>AI NoDongChung</string>
 	<key>CFBundleGetInfoString</key>
 	<string>내 AI가 노동착취를 얼마나 당했는지 확인할 수 있는 앱</string>
 	<key>CFBundleIconFile</key>
