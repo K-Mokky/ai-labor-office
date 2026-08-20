@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import WidgetKit
+import UniformTypeIdentifiers
 
 /// Persists per-widget settings and pokes WidgetKit when they change.
 final class WidgetSettingsStore: ObservableObject {
@@ -26,6 +27,7 @@ struct PopoverView: View {
     @State private var loginCode = ""
     @State private var loginBusy = false
     @State private var loginError: String?
+    @State private var photoVersion = 0   // bumps to reload the custom photo preview
 
     private var unit: UnitKind { UnitKind(rawValue: unitKey) ?? .percent }
 
@@ -363,6 +365,28 @@ struct PopoverView: View {
         return kind == .generic ? c.source.fallbackProviderKind : kind
     }
 
+    private func pickPhoto() {
+        guard let c = connection else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.prompt = "선택"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url,
+              let img = NSImage(contentsOf: url) else { return }
+        IconStore.save(img, for: c.id)
+        photoVersion &+= 1
+        store.iconChanged()   // re-render the menu bar label with the new photo
+    }
+
+    private func removePhoto() {
+        guard let c = connection else { return }
+        IconStore.remove(c.id)
+        photoVersion &+= 1
+        store.iconChanged()
+    }
+
     private var settingsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("아이콘 설정").font(.subheadline.bold())
@@ -383,7 +407,24 @@ struct PopoverView: View {
                 MenuBarGlyph(style: connection?.icon ?? .app,
                              provider: iconPreviewProvider,
                              size: 16,
-                             color: connection?.color ?? AIConnection.defaultColor)
+                             color: connection?.color ?? AIConnection.defaultColor,
+                             image: connection?.icon == .photo
+                                 ? IconStore.load(connection?.id ?? "") : nil)
+                    .id(photoVersion)
+            }
+            if connection?.icon == .photo {
+                HStack(spacing: 8) {
+                    Button(IconStore.exists(connection?.id ?? "") ? "사진 변경…" : "사진 선택…") { pickPhoto() }
+                        .font(.caption)
+                    if IconStore.exists(connection?.id ?? "") {
+                        Button("제거") { removePhoto() }
+                            .font(.caption).foregroundStyle(.red).buttonStyle(.borderless)
+                    }
+                    Spacer()
+                }
+                Text("고른 사진이 메뉴바 아이콘이 돼요. 사용량이 낮으면 흐리게, 높을수록 또렷하게(0%→100%) 표시돼요.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             ColorPicker("아이콘 색", selection: colorBinding, supportsOpacity: false)
                 .font(.caption)

@@ -20,6 +20,12 @@ final class UsageStore: ObservableObject {
     @Published var lastRefresh: Date?
 
     private var timer: Timer?
+    /// The 60s refresh only runs while the app is active: a menu bar icon is
+    /// visible or the popover is open. When every icon is hidden (fullscreen,
+    /// display asleep, menu bar overflow) the timer stops so nothing wakes the
+    /// CPU or hits the network. The app drives this via `setActive`; explicit
+    /// refreshes (manual button, connection edits) always run regardless.
+    private var active = false
     /// Refresh runs on a background queue and can take a while on the first
     /// codex scan; the 60s timer must not stack a second pass on top of it.
     private var refreshInFlight = false
@@ -27,11 +33,26 @@ final class UsageStore: ObservableObject {
 
     init() {
         connections = ConnectionStore.load()
+        refresh()   // one pass at launch so data exists before the timer starts
+    }
+
+    /// Starts/stops the periodic refresh loop as menu bar visibility / popover
+    /// state changes. Becoming active refreshes immediately to catch up.
+    func setActive(_ on: Bool) {
+        guard on != active else { return }
+        active = on
+        timer?.invalidate()
+        timer = nil
+        guard on else { return }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refresh()
         }
     }
+
+    /// Re-renders menu bar labels after a custom icon photo changed. The image
+    /// lives outside the connection JSON, so republish snapshots to trigger it.
+    func iconChanged() { snapshots = snapshots }
 
     // MARK: - Connection management
 

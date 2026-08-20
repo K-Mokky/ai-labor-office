@@ -54,6 +54,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         syncStatusItems(with: store.connections)
 
+        // Refresh only while a menu bar icon is visible or the popover is open,
+        // so a hidden/occluded app (fullscreen, asleep display, menu bar
+        // overflow) does no periodic work.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(activityMayHaveChanged),
+            name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self, selector: #selector(activityMayHaveChanged), name: name, object: nil)
+        }
+        updateActivity()
+
         // Update check: shortly after launch, then every 6 hours.
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             MainActor.assumeIsolated { self?.updater.check() }
@@ -128,6 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             }
         }
         renderAllLabels()
+        updateActivity()
     }
 
     // MARK: - Clicks
@@ -171,17 +184,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSApp.activate(ignoringOtherApps: true)
         p.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         p.contentViewController?.view.window?.makeKey()
+        updateActivity()
     }
 
     private func closePopover() {
         popover?.performClose(nil)
         popover = nil
+        updateActivity()
     }
 
     func popoverDidClose(_ notification: Notification) {
         lastPopoverClose = Date()
         lastPopoverCloseAnchorID = popoverAnchorID
         popover = nil
+        updateActivity()
     }
 
     private func showContextMenu(for entry: Entry) {
@@ -201,6 +217,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc private func refreshNow() { store.refresh() }
     @objc private func quitApp() { NSApp.terminate(nil) }
 
+    // MARK: - Activity gating
+
+    @objc private func activityMayHaveChanged() { updateActivity() }
+
+    /// The app is worth refreshing when the popover is open or any of its menu
+    /// bar icons is actually on-screen (not hidden by overflow/fullscreen/sleep).
+    private func updateActivity() {
+        let popoverOpen = popover?.isShown == true
+        let anyVisible = entries.contains { entry in
+            guard let window = entry.item.button?.window else { return true }
+            return window.occlusionState.contains(.visible)
+        }
+        store.setActive(popoverOpen || anyVisible)
+    }
+
     // MARK: - Labels
 
     private func renderAllLabels() {
@@ -216,8 +247,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             var kind = snap?.providerKind ?? .generic
             if kind == .generic { kind = conn.source.fallbackProviderKind }
             let fraction = snap.flatMap { $0.fraction(for: conn.metric) }
+            let customImage = conn.icon == .photo ? IconStore.load(conn.id) : nil
             view = FilledMenuBarIcon(style: conn.icon, provider: kind, fraction: fraction,
-                                     size: 18, color: conn.color)
+                                     size: 18, color: conn.color, image: customImage)
             var tip = "\(conn.name) — \(conn.metric.title(in: snap))"
             if let fraction { tip += " \(fmtPercent(fraction))" }
             if let resets = quotaWindow(for: conn.metric, in: snap)?.resetsAt, resets > Date() {
@@ -256,6 +288,7 @@ struct MenuBarGlyph: View {
     let provider: ProviderKind   // resolved source provider, used by .auto
     var size: CGFloat = 18
     var color: Color = AIConnection.defaultColor
+    var image: NSImage? = nil    // custom photo for the .photo style
 
     var body: some View {
         switch style {
@@ -267,6 +300,13 @@ struct MenuBarGlyph: View {
         case .cursor: ProviderIcon(kind: .cursor, size: size, color: color)
         case .grok: ProviderIcon(kind: .grok, size: size, color: color)
         case .chart: ProviderIcon(kind: .generic, size: size, color: color)
+        case .photo:
+            if let image {
+                Image(nsImage: image).resizable().interpolation(.high)
+                    .frame(width: size, height: size)
+            } else {
+                AppIconGlyph(size: size, color: color)   // no photo picked yet
+            }
         }
     }
 }
@@ -364,22 +404,40 @@ struct FilledMenuBarIcon: View {
     let fraction: Double?
     var size: CGFloat = 18
     var color: Color = AIConnection.defaultColor
+    var image: NSImage? = nil     // custom photo for the .photo style
+
+    /// A photo without a chosen image falls back to the app glyph gauge.
+    private var effectiveStyle: IconStyle { style == .photo ? .app : style }
 
     private var profileKey: String {
-        style == .auto ? "auto-\(provider.rawValue)" : style.rawValue
+        effectiveStyle == .auto ? "auto-\(provider.rawValue)" : effectiveStyle.rawValue
     }
 
     var body: some View {
+        if style == .photo, let image {
+            // The photo style fills by opacity, not a bottom-up ink mask:
+            // faint when idle, fully opaque at 100% usage.
+            let f = fraction.map { Swift.min(Swift.max($0, 0), 1) } ?? 0
+            Image(nsImage: image)
+                .resizable().interpolation(.high)
+                .frame(width: size, height: size)
+                .opacity(0.15 + 0.85 * f)
+        } else {
+            inkGauge
+        }
+    }
+
+    private var inkGauge: some View {
         ZStack {
-            MenuBarGlyph(style: style, provider: provider, size: size, color: color)
+            MenuBarGlyph(style: effectiveStyle, provider: provider, size: size, color: color)
                 .opacity(0.28)
             if let fraction, fraction > 0 {
                 let height = GlyphInkProfile.maskHeight(key: profileKey, fraction: fraction) {
-                    AnyView(MenuBarGlyph(style: style, provider: provider,
+                    AnyView(MenuBarGlyph(style: effectiveStyle, provider: provider,
                                          size: CGFloat(GlyphInkProfile.sampleSize),
                                          color: .black))
                 }
-                MenuBarGlyph(style: style, provider: provider, size: size, color: color)
+                MenuBarGlyph(style: effectiveStyle, provider: provider, size: size, color: color)
                     .mask(alignment: .bottom) {
                         Rectangle()
                             .frame(width: size, height: size * height)

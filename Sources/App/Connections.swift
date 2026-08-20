@@ -69,7 +69,7 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
 /// Shape drawn in the menu bar for a connection. `.app` — the AI 노동청
 /// starburst splat — is the default; `.auto` follows the detected provider.
 enum IconStyle: String, CaseIterable, Identifiable {
-    case app, auto, claude, gpt, gemini, cursor, grok, chart
+    case app, auto, claude, gpt, gemini, cursor, grok, chart, photo
 
     var id: String { rawValue }
 
@@ -83,6 +83,7 @@ enum IconStyle: String, CaseIterable, Identifiable {
         case .cursor: return "Cursor"
         case .grok: return "Grok"
         case .chart: return "차트"
+        case .photo: return "사진"
         }
     }
 }
@@ -168,5 +169,61 @@ extension Color {
                       Int(round(ns.redComponent * 255)),
                       Int(round(ns.greenComponent * 255)),
                       Int(round(ns.blueComponent * 255)))
+    }
+}
+
+// MARK: - Custom menu bar photos
+
+/// Per-connection custom menu bar images (the `.photo` icon style). Stored as
+/// small square PNGs under Application Support, keyed by connection id, so the
+/// connection JSON in user defaults stays light.
+enum IconStore {
+    static var dir: URL {
+        SnapshotIO.directory.appendingPathComponent("icons", isDirectory: true)
+    }
+
+    private static func url(for id: String) -> URL {
+        dir.appendingPathComponent(id + ".png")
+    }
+
+    static func exists(_ id: String) -> Bool {
+        !id.isEmpty && FileManager.default.fileExists(atPath: url(for: id).path)
+    }
+
+    static func load(_ id: String) -> NSImage? {
+        guard !id.isEmpty else { return nil }
+        return NSImage(contentsOf: url(for: id))
+    }
+
+    static func remove(_ id: String) {
+        try? FileManager.default.removeItem(at: url(for: id))
+    }
+
+    /// Downscales `image` to a menu-bar-sized square PNG (aspect-fill) and saves it.
+    @discardableResult
+    static func save(_ image: NSImage, for id: String) -> Bool {
+        guard !id.isEmpty, let png = squarePNG(image, side: 96) else { return false }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return (try? png.write(to: url(for: id), options: .atomic)) != nil
+    }
+
+    private static func squarePNG(_ image: NSImage, side: Int) -> Data? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        rep.size = NSSize(width: side, height: side)
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        // Aspect-fill: cover the square, cropping the overflow.
+        let s = image.size
+        let scale = Swift.max(CGFloat(side) / Swift.max(s.width, 1),
+                              CGFloat(side) / Swift.max(s.height, 1))
+        let w = s.width * scale, h = s.height * scale
+        image.draw(in: NSRect(x: (CGFloat(side) - w) / 2, y: (CGFloat(side) - h) / 2,
+                              width: w, height: h),
+                   from: .zero, operation: .copy, fraction: 1)
+        return rep.representation(using: .png, properties: [:])
     }
 }
