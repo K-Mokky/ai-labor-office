@@ -178,6 +178,14 @@ func fmtPercent(_ f: Double) -> String {
     String(format: "%.0f%%", f * 100)
 }
 
+func fmtDayKey(_ key: String) -> String {
+    guard let d = dayKeyFormatter.date(from: key) else { return key }
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "ko_KR")
+    f.dateFormat = "yyyy. M. d"
+    return f.string(from: d)
+}
+
 /// Time left until `date`, coarsened for glanceable UI: "1일 13시간", "3시간 24분", "12분".
 func fmtRemaining(_ date: Date) -> String {
     let mins = max(0, Int(date.timeIntervalSinceNow / 60))
@@ -274,8 +282,41 @@ extension UsageSnapshot {
             return mu.cost / totalCost
         }
     }
-}
 
+    /// First / last day that actually has usage, plus the span in days.
+    var historyRange: (first: String, last: String, days: Int)? {
+        let keys = days.filter { $0.tokens > 0 || $0.cost > 0 || $0.messages > 0 }
+            .map(\.date).sorted()
+        guard let first = keys.first, let last = keys.last,
+              let a = dayKeyFormatter.date(from: first),
+              let b = dayKeyFormatter.date(from: last) else { return nil }
+        let span = Calendar.current.dateComponents([.day], from: a, to: b).day ?? 0
+        return (first, last, span + 1)
+    }
+
+    /// How many weeks of heatmap are needed to cover recorded history (capped).
+    var historyWeeks: Int {
+        guard let range = historyRange,
+              let first = dayKeyFormatter.date(from: range.first) else { return 24 }
+        let today = Calendar.current.startOfDay(for: Date())
+        let days = max(1, Calendar.current.dateComponents([.day], from: first, to: today).day ?? 1)
+        return min(max(Int(ceil(Double(days + 7) / 7.0)), 12), 78)
+    }
+
+    var activeDayCount: Int {
+        days.filter { $0.tokens > 0 || $0.cost > 0 || $0.messages > 0 }.count
+    }
+
+    var averageDailyCost: Double {
+        guard activeDayCount > 0 else { return 0 }
+        return totalCost / Double(activeDayCount)
+    }
+
+    var averageDailyTokens: Int {
+        guard activeDayCount > 0 else { return 0 }
+        return totalTokens / activeDayCount
+    }
+}
 let dayKeyFormatter: DateFormatter = {
     let f = DateFormatter()
     f.dateFormat = "yyyy-MM-dd"

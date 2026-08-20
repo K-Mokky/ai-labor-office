@@ -132,6 +132,16 @@ struct PopoverView: View {
             }
             if connection != nil {
                 Button {
+                    NotificationCenter.default.post(
+                        name: .openLifetimeStats,
+                        object: nil,
+                        userInfo: ["connectionID": connectionID as Any])
+                } label: {
+                    Image(systemName: "chart.bar.doc.horizontal")
+                }
+                .buttonStyle(.borderless)
+                .help("전체 통계")
+                Button {
                     withAnimation { showSettings.toggle() }
                 } label: {
                     Image(systemName: showSettings ? "gearshape.fill" : "gearshape")
@@ -169,6 +179,15 @@ struct PopoverView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
+    private var lifetimeSub: String? {
+        guard let s = snapshot else { return nil }
+        var parts = ["\(s.totalMessages)개 메시지"]
+        if let range = s.historyRange {
+            parts.append("\(fmtDayKey(range.first))–\(fmtDayKey(range.last))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
 
     // MARK: Summary cards
 
@@ -178,7 +197,7 @@ struct PopoverView: View {
         return VStack(spacing: 8) {
             HStack(spacing: 8) {
                 StatCard(title: "전체 사용량", cost: s?.totalCost, tokens: s?.totalTokens,
-                         sub: s.map { "\($0.totalMessages)개 메시지" })
+                         sub: lifetimeSub)
                 StatCard(title: "오늘 사용량", cost: s?.todayCost, tokens: s?.todayTokens, sub: nil)
             }
             HStack(alignment: .top, spacing: 8) {
@@ -186,15 +205,16 @@ struct PopoverView: View {
                     // Grok has no 5h session quota; its session slot instead
                     // breaks the weekly credits down by product (Build/Chat/Imagine).
                     grokProductCard(tint: tint)
+                    grokWeekCard(snapshot: s, tint: tint)
                 } else {
                     StatCard(title: "세션 사용량", cost: s?.sessionCost, tokens: s?.sessionTokens,
                              sub: sessionSub, fraction: s.flatMap { $0.fraction(for: .session) },
                              tint: tint)
+                    StatCard(title: "주간 사용량", cost: s?.weekCost, tokens: s?.weekTokens,
+                             sub: weekSub,
+                             fraction: weekFraction,
+                             tint: tint)
                 }
-                StatCard(title: "주간 사용량", cost: s?.weekCost, tokens: s?.weekTokens,
-                         sub: weekSub,
-                         fraction: weekFraction,
-                         tint: tint)
             }
         }
     }
@@ -222,9 +242,51 @@ struct PopoverView: View {
         if let w = s.limitWindow("7d") {
             return "7일 한도 · \(resetText(w.resetsAt))\(staleSuffix(w))"
         }
-        // Grok has no local-history baseline worth showing; prompt a refresh.
-        if connection?.source == .grok { return "grok 실행 시 갱신" }
         return "최근 7일 · 역대 최고 대비"
+    }
+
+    /// SuperGrok weekly credits are a percent meter, not dollars. Showing the
+    /// local API-price estimate as the big number next to that ring made 10%
+    /// look like $0.11.
+    private func grokWeekCard(snapshot s: UsageSnapshot?, tint: Color) -> some View {
+        let fraction = s?.limitWindow("7d")?.usedFraction
+        return HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("주간 한도").font(.caption).foregroundStyle(.secondary)
+                Text(fraction.map(fmtPercent) ?? "—")
+                    .font(.title3.bold()).monospacedDigit()
+                HStack(spacing: 4) {
+                    if let tokens = s?.weekTokens {
+                        Text("\(fmtTokens(tokens)) tok")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    if let sub = grokWeekSub {
+                        Text("· \(sub)").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                if let cost = s?.weekCost, cost > 0 {
+                    Text("로컬 추정 \(fmtCost(cost)) · SuperGrok 크레딧과 별개")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let fraction {
+                Spacer(minLength: 0)
+                RingGauge(fraction: fraction, size: 34, lineWidth: 3.5,
+                          tint: tint, showLabel: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+    }
+
+    private var grokWeekSub: String? {
+        guard let s = snapshot else { return nil }
+        if let w = s.limitWindow("7d") {
+            return "\(resetText(w.resetsAt))\(staleSuffix(w))"
+        }
+        return "grok 실행 시 갱신"
     }
 
     /// " · N시간 전 기준" when the window came from a stale cached report.
@@ -322,8 +384,17 @@ struct PopoverView: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
             HeatmapView(dayMap: snapshot?.dayMap ?? [:],
-                        weeks: 24, cellSize: 10.5, spacing: 3,
+                        weeks: min(snapshot?.historyWeeks ?? 24, 24),
+                        cellSize: 10.5, spacing: 3,
                         unit: unit == .tokens ? .tokens : .cost)
+            Button("기록된 전체 기간 통계 열기") {
+                NotificationCenter.default.post(
+                    name: .openLifetimeStats,
+                    object: nil,
+                    userInfo: ["connectionID": connectionID as Any])
+            }
+            .font(.caption)
+            .buttonStyle(.borderless)
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
@@ -457,7 +528,7 @@ struct PopoverView: View {
                 }
             Toggle("새 버전이 있으면 자동으로 설치", isOn: $autoUpdate)
                 .font(.caption)
-            Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 세션·주간은 프로바이더가 실제 적용하는 한도 기준입니다(100% = 한도 소진) — Claude는 Anthropic 5시간·7일 한도, Codex는 ChatGPT 플랜의 5시간·주간 한도, Grok은 SuperGrok 주간 크레딧 한도(세션 한도는 없음). 한도를 읽지 못하면(예: Gemini) 역대 최대 기록 대비로 표시하고, 오늘은 항상 최고 일간 대비입니다.")
+            Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 세션·주간은 프로바이더가 실제 적용하는 한도 기준입니다(100% = 한도 소진) — Claude는 Anthropic 5시간·7일 한도, Codex는 ChatGPT 플랜의 5시간·주간 한도, Grok은 SuperGrok 주간 크레딧(세션 한도는 없음, 로컬 $ 추정과는 별개). 한도를 읽지 못하면(예: Gemini) 역대 최대 기록 대비로 표시하고, 오늘은 항상 최고 일간 대비입니다.")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }

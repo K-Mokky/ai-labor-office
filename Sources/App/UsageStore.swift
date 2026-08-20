@@ -918,9 +918,19 @@ final class UsageStore: ObservableObject {
                                                  : (1.25, 10, 0.125, 0)      // pro
         }
         else if m.contains("grok") {
-            (i, o, cr, cw) = m.contains("mini") ? (0.3, 0.5, 0.03, 0)
-                           : m.contains("4.20") ? (2, 6, 0.2, 0)
-                                                : (1.25, 2.5, 0.125, 0)      // grok-4 family
+            // docs.x.ai/developers/pricing — short-context (<200k prompt) rates.
+            // SuperGrok credits are a separate meter and are never derived from these.
+            if m.contains("mini") {
+                (i, o, cr, cw) = (0.3, 0.5, 0.03, 0)
+            } else if m.contains("4.6") || m.contains("4.5") {
+                (i, o, cr, cw) = (2, 6, 0.5, 0)          // grok-4.6 / 4.5
+            } else if m.contains("4.20") || m.contains("4.3") {
+                (i, o, cr, cw) = (1.25, 2.5, 0.2, 0)
+            } else if m.contains("build") {
+                (i, o, cr, cw) = (1, 2, 0.2, 0)
+            } else {
+                (i, o, cr, cw) = (2, 6, 0.5, 0)          // current flagship default
+            }
         }
         else if m.contains("composer") || m.contains("cursor") {
             (i, o, cr, cw) = (1.25, 10, 0.125, 0)                            // cursor composer

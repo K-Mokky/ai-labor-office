@@ -25,6 +25,48 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
         }
     }
 
+    /// Flat monthly subscription this source typically bills against.
+    /// API-token estimates on the snapshot are a different meter.
+    var subscriptionUSD: Double? {
+        switch self {
+        case .claudeCode, .gjc: return 200   // Claude Max
+        case .codex: return 200              // ChatGPT Pro / Codex
+        case .gemini: return 20              // Google AI Pro
+        case .cursor: return 20              // Cursor Pro
+        case .grok: return 300               // SuperGrok Heavy
+        }
+    }
+
+    var subscriptionLabel: String {
+        switch self {
+        case .claudeCode, .gjc: return "Claude Max"
+        case .codex: return "ChatGPT Pro"
+        case .gemini: return "Google AI Pro"
+        case .cursor: return "Cursor Pro"
+        case .grok: return "SuperGrok Heavy"
+        }
+    }
+
+    /// Claude Code and GJC share one Anthropic Max bill; other sources bill separately.
+    var subscriptionGroup: String {
+        switch self {
+        case .claudeCode, .gjc: return "claude"
+        default: return rawValue
+        }
+    }
+
+    static func uniqueSubscriptions(in sources: [SourceKind]) -> [(label: String, usd: Double)] {
+        var seen = Set<String>()
+        var out: [(String, Double)] = []
+        for s in sources {
+            guard seen.insert(s.subscriptionGroup).inserted,
+                  let usd = s.subscriptionUSD else { continue }
+            out.append((s.subscriptionLabel, usd))
+        }
+        return out
+    }
+
+
     var detail: String {
         switch self {
         case .claudeCode: return "~/.claude/projects"

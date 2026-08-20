@@ -14,6 +14,9 @@ struct AIUsageApp: App {
         Settings { EmptyView() }   // no windows; the status items drive the UI
     }
 }
+extension Notification.Name {
+    static let openLifetimeStats = Notification.Name("openLifetimeStats")
+}
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
@@ -32,12 +35,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var lastPopoverClose = Date.distantPast
     private var lastPopoverCloseAnchorID = ""
     private var cancellables = Set<AnyCancellable>()
+    private var statsWindow: NSWindow?
+    private var statsConnectionID: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         if migrateToASCIIBundleNameIfNeeded() { return }   // relaunching from the new path
 
         LoginItem.refreshAgentPathIfNeeded()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(openStatsFromNote(_:)),
+            name: .openLifetimeStats, object: nil)
+
 
         store.$connections
             .receive(on: DispatchQueue.main)
@@ -201,6 +210,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func showContextMenu(for entry: Entry) {
         let menu = NSMenu()
+        let stats = NSMenuItem(title: "전체 통계…", action: #selector(openLifetimeStats(_:)), keyEquivalent: "s")
+        stats.target = self
+        stats.representedObject = entry.connectionID
+        menu.addItem(stats)
+        if store.connections.count > 1 {
+            let all = NSMenuItem(title: "연결한 AI 합산 통계…", action: #selector(openCombinedStats), keyEquivalent: "")
+            all.target = self
+            menu.addItem(all)
+        }
+        menu.addItem(.separator())
         let refresh = NSMenuItem(title: "새로고침", action: #selector(refreshNow), keyEquivalent: "r")
         refresh.target = self
         menu.addItem(refresh)
@@ -215,6 +234,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func refreshNow() { store.refresh() }
     @objc private func quitApp() { NSApp.terminate(nil) }
+    @objc private func openStatsFromNote(_ note: Notification) {
+        let combined = (note.userInfo?["combined"] as? Bool) ?? false
+        let id = note.userInfo?["connectionID"] as? String
+        showStatsWindow(connectionID: id, combined: combined)
+    }
+
+
+    @objc private func openLifetimeStats(_ sender: NSMenuItem) {
+        let id = sender.representedObject as? String
+        showStatsWindow(connectionID: (id?.isEmpty == false) ? id : nil)
+    }
+
+    @objc private func openCombinedStats() {
+        showStatsWindow(connectionID: nil, combined: true)
+    }
+
+    /// Detached window of recorded-history totals (tokens, models, API vs subscription).
+    fileprivate func showStatsWindow(connectionID: String?, combined: Bool = false) {
+        closePopover()
+        let key = combined ? "__combined__" : (connectionID ?? "")
+        if let existing = statsWindow, statsConnectionID == key {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        statsWindow?.close()
+
+        let root = LifetimeStatsView(store: store, connectionID: combined ? nil : connectionID,
+                                     combined: combined)
+        let host = NSHostingController(rootView: root)
+        let window = NSWindow(contentViewController: host)
+        window.title = combined ? "AI 노동청 · 합산 통계" : "AI 노동청 · 전체 통계"
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(NSSize(width: 560, height: 640))
+        window.minSize = NSSize(width: 480, height: 420)
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        statsWindow = window
+        statsConnectionID = key
+        updateActivity()
+    }
 
     // MARK: - Activity gating
 
@@ -224,11 +286,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// bar icons is actually on-screen (not hidden by overflow/fullscreen/sleep).
     private func updateActivity() {
         let popoverOpen = popover?.isShown == true
+        let statsOpen = statsWindow?.isVisible == true
         let anyVisible = entries.contains { entry in
             guard let window = entry.item.button?.window else { return true }
             return window.occlusionState.contains(.visible)
         }
-        store.setActive(popoverOpen || anyVisible)
+        store.setActive(popoverOpen || statsOpen || anyVisible)
     }
 
     // MARK: - Labels
