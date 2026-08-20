@@ -1,24 +1,27 @@
 import Foundation
 
-/// Grok's (xAI) official usage/limit numbers — the ones normally only visible on
-/// grok.com or in the Grok app — read the same way the CLI's billing page does.
+/// Grok's official weekly quota — the SuperGrok credits window shown on
+/// grok.com / the Grok app, which a CLI OIDC token can also read.
 ///
-/// Auth reuses the grok CLI's own OIDC access token in `~/.grok/auth.json`
-/// (read-only: its refresh token is rotated solely by the grok CLI, so we never
-/// spend it), or the `XAI_API_KEY` environment key as a fallback. The token is
-/// only valid for a few hours; when it has lapsed we report nothing and the UI
-/// falls back to the estimate derived from local `~/.grok` logs.
+/// Auth reuses the grok CLI's own OIDC token in `~/.grok/auth.json`. When the
+/// stored access token has lapsed we refresh it exactly the way the grok CLI
+/// does — an OIDC `refresh_token` grant against the issuer — and write the
+/// rotated tokens back to `auth.json`, so the CLI keeps working and the quota
+/// keeps updating even when grok has not been run for a while. `XAI_API_KEY`
+/// is the last-resort fallback.
 ///
-/// The endpoint is `GET https://cli-chat-proxy.grok.com/v1/billing`, which
-/// returns the billing meter: dollars used against the monthly / on-demand cap
-/// over the current billing period. The per-query rate limits the web app shows
-/// live behind a grok.com *web session* — an OIDC bearer is rejected there with
-/// `oauth2-auth-forbidden` — so the billing meter is what a CLI token can read.
+/// The report comes from `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`
+/// (the `format=credits` form the CLI itself uses in `billing.rs`). Without that
+/// query `/v1/billing` returns only the monthly *dollar* meter — all zeros on a
+/// flat subscription — hiding the weekly quota. The credits form carries
+/// `creditUsagePercent` (0…100 of the weekly allotment), a
+/// `USAGE_PERIOD_TYPE_WEEKLY` window, and a per-product usage split. Grok has no
+/// 5-hour session quota.
 enum GrokUsageProbe {
-    private static let endpoint = URL(string: "https://cli-chat-proxy.grok.com/v1/billing")!
+    private static let creditsURL = URL(string: "https://cli-chat-proxy.grok.com/v1/billing?format=credits")!
     private static let timeout: TimeInterval = 8
 
-    /// A billing report is only interesting live, so keep no cache — matching
+    /// A quota report is only interesting live, so keep no cache — matching
     /// how the Anthropic quota probe avoids a stale replay.
     private static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
@@ -28,95 +31,156 @@ enum GrokUsageProbe {
         return URLSession(configuration: cfg)
     }()
 
-    /// The live billing meter, or `nil` when no valid token exists or the report
-    /// is unreadable. Synchronous on purpose: callers run on a background queue.
+    /// The live weekly credits meter, or `nil` when no token can be obtained or
+    /// the report is unreadable. Synchronous: callers run on a background queue.
     static func fetch() -> GrokBilling? {
         guard let token = accessToken() else { return nil }
         return fetchLive(token: token)
     }
 
-    // MARK: - Credentials (read-only)
+    // MARK: - Credentials
 
-    /// The grok CLI's access token while it is still valid, else `XAI_API_KEY`.
-    /// `auth.json` holds one entry keyed by `"<issuer>::<client_id>"`; `.key` is
-    /// the bearer JWT and `expires_at` its wall-clock expiry.
+    private static var authPath: String { SnapshotIO.realHome + "/.grok/auth.json" }
+
+    /// A usable access token: the stored one while still valid, a freshly
+    /// refreshed one (persisted back for the CLI), else `XAI_API_KEY`.
     private static func accessToken() -> String? {
-        let path = SnapshotIO.realHome + "/.grok/auth.json"
-        if let data = FileManager.default.contents(atPath: path),
+        if let data = FileManager.default.contents(atPath: authPath),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            for case let entry as [String: Any] in obj.values {
-                guard let key = entry["key"] as? String, !key.isEmpty else { continue }
-                // Skip an expired token rather than send a doomed request.
-                if let raw = entry["expires_at"] as? String, let exp = parseDate(raw),
-                   exp.timeIntervalSinceNow <= 60 { continue }
-                return key
+            // auth.json holds one entry keyed by "<issuer>::<client_id>".
+            for (key, value) in obj {
+                guard let entry = value as? [String: Any],
+                      let access = entry["key"] as? String, !access.isEmpty else { continue }
+                let expiry = (entry["expires_at"] as? String).flatMap(parseDate)
+                if let expiry, expiry.timeIntervalSinceNow > 60 { return access }
+                // Expired (or unknown expiry): refresh like the CLI, else use as-is.
+                if let refreshed = refresh(entry: entry, key: key, all: obj) { return refreshed }
+                if expiry == nil { return access }
             }
         }
         let env = ProcessInfo.processInfo.environment["XAI_API_KEY"]
         return (env?.isEmpty == false) ? env : nil
     }
 
+    /// Runs the OIDC `refresh_token` grant and writes the rotated tokens back to
+    /// `auth.json` (atomic, `0600`) so the grok CLI stays logged in. Returns the
+    /// new access token, or `nil` on any failure.
+    private static func refresh(entry: [String: Any], key: String, all: [String: Any]) -> String? {
+        guard let refreshToken = entry["refresh_token"] as? String, !refreshToken.isEmpty,
+              let clientID = entry["oidc_client_id"] as? String,
+              let issuer = entry["oidc_issuer"] as? String,
+              let url = URL(string: issuer + "/oauth2/token") else { return nil }
+
+        var req = URLRequest(url: url, timeoutInterval: timeout)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.httpBody = formBody([
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": clientID,
+        ])
+
+        guard let obj = post(req),
+              let access = obj["access_token"] as? String, !access.isEmpty else { return nil }
+
+        var updated = entry
+        updated["key"] = access
+        if let rotated = obj["refresh_token"] as? String, !rotated.isEmpty {
+            updated["refresh_token"] = rotated
+        }
+        let expiresIn = numberValue(obj["expires_in"]) ?? 21600
+        updated["expires_at"] = isoTimestamp(Date().addingTimeInterval(expiresIn))
+        updated["create_time"] = isoTimestamp(Date())
+
+        var merged = all
+        merged[key] = updated
+        writeAuth(merged)
+        return access
+    }
+
+    /// Atomically rewrites `auth.json`, restoring owner-only permissions.
+    private static func writeAuth(_ obj: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(obj),
+              let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted])
+        else { return }
+        let url = URL(fileURLWithPath: authPath)
+        guard (try? data.write(to: url, options: .atomic)) != nil else { return }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authPath)
+    }
+
     // MARK: - Live report
 
     private static func fetchLive(token: String) -> GrokBilling? {
-        var req = URLRequest(url: endpoint,
+        var req = URLRequest(url: creditsURL,
                              cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
                              timeoutInterval: timeout)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("xai-grok-cli", forHTTPHeaderField: "X-XAI-Token-Auth")
 
-        var payload: Data?
+        guard let obj = post(req),
+              let config = obj["config"] as? [String: Any],
+              let percent = numberValue(config["creditUsagePercent"]) else { return nil }
+
+        let period = config["currentPeriod"] as? [String: Any]
+        let end = parseDate(period?["end"] as? String)
+            ?? parseDate(config["billingPeriodEnd"] as? String)
+        let start = parseDate(period?["start"] as? String)
+            ?? parseDate(config["billingPeriodStart"] as? String)
+
+        var products: [GrokProductUsage] = []
+        for row in config["productUsage"] as? [[String: Any]] ?? [] {
+            guard let name = row["product"] as? String, !name.isEmpty else { continue }
+            products.append(GrokProductUsage(name: name, percent: numberValue(row["usagePercent"])))
+        }
+
+        return GrokBilling(usedPercent: percent, periodStart: start,
+                           periodEnd: end, products: products, fetchedAt: Date())
+    }
+
+    // MARK: - HTTP + parsing helpers
+
+    /// Runs a request synchronously and returns its 200 JSON object, else nil.
+    private static func post(_ req: URLRequest) -> [String: Any]? {
+        var result: [String: Any]?
         let done = DispatchSemaphore(value: 0)
         session.dataTask(with: req) { data, response, _ in
-            if (response as? HTTPURLResponse)?.statusCode == 200 { payload = data }
+            if (response as? HTTPURLResponse)?.statusCode == 200, let data {
+                result = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            }
             done.signal()
         }.resume()
-
-        guard done.wait(timeout: .now() + timeout + 2) == .success,
-              let payload,
-              let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
-              let config = obj["config"] as? [String: Any]
-        else { return nil }
-
-        return GrokBilling(
-            used: money(config["used"]),
-            monthlyLimit: money(config["monthlyLimit"]),
-            onDemandCap: money(config["onDemandCap"]),
-            onDemandUsed: money(currentCycle(config)?["onDemandUsed"]),
-            periodStart: parseDate(config["billingPeriodStart"] as? String),
-            periodEnd: parseDate(config["billingPeriodEnd"] as? String),
-            fetchedAt: Date()
-        )
+        _ = done.wait(timeout: .now() + timeout + 2)
+        return result
     }
 
-    /// The `history` row for the period `billingPeriodStart` falls in, if any —
-    /// its `onDemandUsed` is the spend that counts against `onDemandCap`.
-    private static func currentCycle(_ config: [String: Any]) -> [String: Any]? {
-        guard let history = config["history"] as? [[String: Any]],
-              let start = parseDate(config["billingPeriodStart"] as? String) else { return nil }
-        let cal = Calendar.current
-        let year = cal.component(.year, from: start)
-        let month = cal.component(.month, from: start)
-        return history.first { row in
-            guard let cycle = row["billingCycle"] as? [String: Any] else { return false }
-            return (cycle["year"] as? Int) == year && (cycle["month"] as? Int) == month
-        }
+    /// `application/x-www-form-urlencoded` body; values are RFC3986 unreserved-escaped.
+    private static func formBody(_ fields: [String: String]) -> Data? {
+        let unreserved = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let body = fields.map { key, value in
+            let v = value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
+            return "\(key)=\(v)"
+        }.joined(separator: "&")
+        return body.data(using: .utf8)
     }
 
-    /// xAI money values arrive as `{ "val": <number> }`; `val` may decode as an
-    /// Int, Double, NSNumber, or numeric string depending on the amount.
-    private static func money(_ any: Any?) -> Double {
-        guard let wrapped = any as? [String: Any] else { return 0 }
-        switch wrapped["val"] {
+    private static func numberValue(_ any: Any?) -> Double? {
+        switch any {
         case let d as Double: return d
         case let i as Int: return Double(i)
         case let n as NSNumber: return n.doubleValue
-        case let s as String: return Double(s) ?? 0
-        default: return 0
+        case let s as String: return Double(s)
+        default: return nil
         }
     }
 
-    /// Parses `2026-09-01T00:00:00+00:00` (and the fractional-seconds variant).
+    private static func isoTimestamp(_ date: Date) -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.string(from: date)
+    }
+
+    /// Parses `2026-08-23T16:23:48.614414+00:00` (and the no-fraction variant).
     private static func parseDate(_ raw: String?) -> Date? {
         guard let raw else { return nil }
         let withFraction = ISO8601DateFormatter()
@@ -127,29 +191,29 @@ enum GrokUsageProbe {
     }
 }
 
-/// Grok's billing meter for the current period. Dollar amounts; a limit of `0`
-/// means the account has no dollar cap of that kind (e.g. a flat subscription).
+struct GrokProductUsage: Identifiable {
+    var name: String        // "GrokBuild" | "GrokChat" | "GrokImagine"
+    var percent: Double?    // 0…100 of the weekly allotment; nil == unused/not reported
+    var id: String { name }
+}
+
+/// Grok's weekly SuperGrok credits meter. `usedPercent` is 0…100 of the weekly
+/// allotment (`creditUsagePercent`).
 struct GrokBilling {
-    var used: Double
-    var monthlyLimit: Double
-    var onDemandCap: Double
-    var onDemandUsed: Double
+    var usedPercent: Double
     var periodStart: Date?
     var periodEnd: Date?
+    var products: [GrokProductUsage]
     var fetchedAt: Date
 
-    /// The dollar ceiling that actually applies, if any: the monthly/included
-    /// limit when set, otherwise the on-demand cap.
-    var effectiveLimit: Double? {
-        if monthlyLimit > 0 { return monthlyLimit }
-        if onDemandCap > 0 { return onDemandCap }
-        return nil
-    }
+    /// 0…1 share of the weekly credits window.
+    var fraction: Double { min(max(usedPercent / 100, 0), 1) }
 
-    /// Share of the applicable limit spent this period (0…1), or `nil` when the
-    /// account has no dollar cap to measure against.
-    var fraction: Double? {
-        guard let limit = effectiveLimit, limit > 0 else { return nil }
-        return min(max(used / limit, 0), 1)
+    /// The weekly window the rest of the app already knows how to draw
+    /// (`limitWindow("7d")` → 주간 카드 / 메뉴바 주간 채움). No 5h window: Grok
+    /// has no session quota.
+    var weeklyWindow: LimitWindow {
+        LimitWindow(id: "7d", label: "Grok Weekly",
+                    usedFraction: fraction, resetsAt: periodEnd, asOf: fetchedAt)
     }
 }

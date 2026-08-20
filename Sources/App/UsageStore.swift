@@ -101,18 +101,21 @@ final class UsageStore: ObservableObject {
                 $0.source == .claudeCode || $0.source == .gjc
             }
             let claudeLimits = wantsClaudeQuota ? RateLimitProbe.fetch() : []
-            // Grok's official billing meter, only when a Grok connection wants it.
+            // Grok's official weekly credits meter, only when a Grok connection wants it.
             let grokBilling = conns.contains { $0.source == .grok }
                 ? GrokUsageProbe.fetch() : nil
+            let grokLimits = grokBilling.map { [$0.weeklyWindow] } ?? []
             var snaps: [String: UsageSnapshot] = [:]
             for c in conns {
                 snaps[c.id] = Self.aggregate(events: bySource[c.source] ?? [],
                                              now: now, claudeLimits: claudeLimits,
-                                             gptLimits: gptLimits)
+                                             gptLimits: gptLimits,
+                                             grokLimits: grokLimits)
             }
             let combined = Self.aggregate(events: bySource.values.flatMap { $0 },
                                           now: now, claudeLimits: claudeLimits,
-                                          gptLimits: gptLimits)
+                                          gptLimits: gptLimits,
+                                          grokLimits: grokLimits)
 
             // Widgets can show the combined view or a single source.
             var payload = WidgetPayload(combined: combined)
@@ -929,7 +932,8 @@ final class UsageStore: ObservableObject {
 
     static func aggregate(events: [UsageEvent], now: Date = Date(),
                           claudeLimits: [LimitWindow] = [],
-                          gptLimits: [LimitWindow] = []) -> UsageSnapshot {
+                          gptLimits: [LimitWindow] = [],
+                          grokLimits: [LimitWindow] = []) -> UsageSnapshot {
         let cal = Calendar.current
         let todayKey = dayKeyFormatter.string(from: now)
         let weekStart = cal.date(byAdding: .day, value: -6, to: cal.startOfDay(for: now))!
@@ -1006,11 +1010,13 @@ final class UsageStore: ObservableObject {
         let provider = dominantProvider(events)
         // Quotas belong to the provider account and are shared by every client
         // billing to it: Anthropic's 5h/7d windows apply to any Claude-backed
-        // connection, the ChatGPT plan windows to any GPT-backed one.
+        // connection, the ChatGPT plan windows to any GPT-backed one, and
+        // Grok's weekly SuperGrok credits window to any xAI-backed one.
         let quota: [LimitWindow]
         switch provider {
         case .claude: quota = claudeLimits
         case .gpt: quota = gptLimits
+        case .grok: quota = grokLimits
         default: quota = []
         }
 

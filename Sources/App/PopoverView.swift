@@ -48,7 +48,6 @@ struct PopoverView: View {
                         connectSection
                     } else {
                         summaryCards
-                        grokLimitSection
                         modelSection
                         heatmapSection
                         if showSettings {
@@ -180,16 +179,30 @@ struct PopoverView: View {
                          sub: s.map { "\($0.totalMessages)개 메시지" })
                 StatCard(title: "오늘 사용량", cost: s?.todayCost, tokens: s?.todayTokens, sub: nil)
             }
-            HStack(spacing: 8) {
-                StatCard(title: "세션 사용량", cost: s?.sessionCost, tokens: s?.sessionTokens,
-                         sub: sessionSub, fraction: s.flatMap { $0.fraction(for: .session) },
-                         tint: tint)
+            HStack(alignment: .top, spacing: 8) {
+                if connection?.source == .grok {
+                    // Grok has no 5h session quota; its session slot instead
+                    // breaks the weekly credits down by product (Build/Chat/Imagine).
+                    grokProductCard(tint: tint)
+                } else {
+                    StatCard(title: "세션 사용량", cost: s?.sessionCost, tokens: s?.sessionTokens,
+                             sub: sessionSub, fraction: s.flatMap { $0.fraction(for: .session) },
+                             tint: tint)
+                }
                 StatCard(title: "주간 사용량", cost: s?.weekCost, tokens: s?.weekTokens,
                          sub: weekSub,
-                         fraction: s.flatMap { $0.fraction(for: .week) },
+                         fraction: weekFraction,
                          tint: tint)
             }
         }
+    }
+
+    /// Grok's weekly percent comes only from its real quota window — never the
+    /// local-history fallback, which would misleadingly read ~100%.
+    private var weekFraction: Double? {
+        guard let s = snapshot else { return nil }
+        if connection?.source == .grok { return s.limitWindow("7d")?.usedFraction }
+        return s.fraction(for: .week)
     }
 
     /// Prefers the provider's real 5h quota; falls back to the locally derived block.
@@ -207,6 +220,8 @@ struct PopoverView: View {
         if let w = s.limitWindow("7d") {
             return "7일 한도 · \(resetText(w.resetsAt))\(staleSuffix(w))"
         }
+        // Grok has no local-history baseline worth showing; prompt a refresh.
+        if connection?.source == .grok { return "grok 실행 시 갱신" }
         return "최근 7일 · 역대 최고 대비"
     }
 
@@ -221,54 +236,54 @@ struct PopoverView: View {
         return "\(fmtRemaining(date)) 후 초기화"
     }
 
-    // MARK: Grok billing (xAI official usage & limit)
+    // MARK: Grok weekly per-product usage (fills the session slot for Grok)
 
-    /// Grok's official usage/limit, read live from xAI's billing meter. Shown
-    /// only for a Grok connection; the local logs already drive the cards above.
-    @ViewBuilder private var grokLimitSection: some View {
-        if connection?.source == .grok {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Grok 한도").font(.subheadline.bold())
-                    Spacer()
-                    Text("xAI 공식 청구").font(.caption2).foregroundStyle(.tertiary)
-                }
-                if let b = store.grokBilling {
-                    HStack(alignment: .center, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("이번 청구 기간 사용액").font(.caption).foregroundStyle(.secondary)
-                            Text(fmtCost(b.used)).font(.title3.bold()).monospacedDigit()
-                            if let end = b.periodEnd, end > Date() {
-                                Text("\(fmtRemaining(end)) 후 갱신")
-                                    .font(.caption2).foregroundStyle(.tertiary)
+    /// Grok has no 5h session quota, so the session card is replaced with the
+    /// weekly SuperGrok credits broken down by product as horizontal bars.
+    private func grokProductCard(tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("제품별 주간 사용").font(.caption).foregroundStyle(.secondary)
+            if let products = store.grokBilling?.products, !products.isEmpty {
+                ForEach(products) { p in
+                    HStack(spacing: 6) {
+                        Text(prettyGrokProduct(p.name))
+                            .font(.caption2).lineLimit(1)
+                            .frame(width: 54, alignment: .leading)
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(.quaternary)
+                                Capsule().fill(tint)
+                                    .frame(width: Swift.max(3, geo.size.width * barFraction(p.percent)))
                             }
                         }
-                        Spacer(minLength: 0)
-                        if let f = b.fraction, let limit = b.effectiveLimit {
-                            VStack(alignment: .trailing, spacing: 3) {
-                                RingGauge(fraction: f, size: 34, lineWidth: 3.5,
-                                          tint: connection?.color ?? .accentColor, showLabel: true)
-                                Text("한도 \(fmtCost(limit))").font(.caption2).foregroundStyle(.tertiary)
-                            }
-                        }
+                        .frame(height: 5)
+                        Text(p.percent.map { fmtPercent($0 / 100) } ?? "—")
+                            .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                            .frame(width: 30, alignment: .trailing)
                     }
-                    if b.onDemandCap > 0 {
-                        Text("추가 사용(on-demand) \(fmtCost(b.onDemandUsed)) / \(fmtCost(b.onDemandCap))")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                    if b.effectiveLimit == nil {
-                        Text("구독 요금제라 사용액 기준 한도는 없어요. 쿼리 횟수·리셋은 grok.com·앱 로그인 세션에서만 조회돼요.")
-                            .font(.caption2).foregroundStyle(.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                } else {
-                    Text("grok CLI 토큰이 없거나 만료됐어요 — 터미널에서 grok을 한 번 실행하면 한도가 갱신돼요.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
+            } else {
+                Text("grok CLI 토큰이 없어요 — grok을 한 번 실행하면 갱신돼요.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+    }
+
+    /// 0…1 bar length for a product's weekly usage percent (0…100).
+    private func barFraction(_ percent: Double?) -> Double {
+        Swift.min(Swift.max((percent ?? 0) / 100, 0), 1)
+    }
+
+    private func prettyGrokProduct(_ raw: String) -> String {
+        switch raw {
+        case "GrokBuild": return "Build"
+        case "GrokChat": return "Chat"
+        case "GrokImagine": return "Imagine"
+        default: return raw
         }
     }
 
@@ -401,7 +416,7 @@ struct PopoverView: View {
                 }
             Toggle("새 버전이 있으면 자동으로 설치", isOn: $autoUpdate)
                 .font(.caption)
-            Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 세션·주간은 프로바이더가 실제 적용하는 한도 기준입니다(100% = 한도 소진) — Claude는 Anthropic 5시간·7일 한도, Codex는 ChatGPT 플랜의 5시간·주간 한도. 한도를 읽지 못하면(예: Gemini) 역대 최대 기록 대비로 표시하고, 오늘은 항상 최고 일간 대비입니다.")
+            Text("메뉴바 아이콘은 채움 기준 지표의 사용률만큼 아래에서 위로 채워집니다. 세션·주간은 프로바이더가 실제 적용하는 한도 기준입니다(100% = 한도 소진) — Claude는 Anthropic 5시간·7일 한도, Codex는 ChatGPT 플랜의 5시간·주간 한도, Grok은 SuperGrok 주간 크레딧 한도(세션 한도는 없음). 한도를 읽지 못하면(예: Gemini) 역대 최대 기록 대비로 표시하고, 오늘은 항상 최고 일간 대비입니다.")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
