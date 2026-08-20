@@ -152,7 +152,7 @@ final class Updater: ObservableObject {
             throw err("DMG 다운로드 실패")
         }
         let dst = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AIUsage-update-\(UUID().uuidString).dmg")
+            .appendingPathComponent("AI Labor Office-update-\(UUID().uuidString).dmg")
         try FileManager.default.moveItem(at: tmp, to: dst)
         return dst
     }
@@ -162,7 +162,7 @@ final class Updater: ObservableObject {
     nonisolated private static func replaceBundle(with dmg: URL) throws -> URL {
         let fm = FileManager.default
         let mount = fm.temporaryDirectory
-            .appendingPathComponent("AIUsage-mount-\(UUID().uuidString)")
+            .appendingPathComponent("AI Labor Office-mount-\(UUID().uuidString)")
         try run("/usr/bin/hdiutil", "attach", dmg.path,
                 "-nobrowse", "-readonly", "-mountpoint", mount.path)
         defer {
@@ -188,7 +188,7 @@ final class Updater: ObservableObject {
         let source = mount.appendingPathComponent(appName)
         let target = Bundle.main.bundleURL
         let parked = fm.temporaryDirectory
-            .appendingPathComponent("AIUsage-old-\(UUID().uuidString).app")
+            .appendingPathComponent("AI Labor Office-old-\(UUID().uuidString).app")
 
         try fm.moveItem(at: target, to: parked)
         do {

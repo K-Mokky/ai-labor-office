@@ -296,8 +296,21 @@ enum SnapshotIO {
     }
 
     static var directory: URL {
-        URL(fileURLWithPath: realHome)
-            .appendingPathComponent("Library/Application Support/AIUsage", isDirectory: true)
+        let support = URL(fileURLWithPath: realHome)
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        let current = support.appendingPathComponent("AI Labor Office", isDirectory: true)
+        let legacy = support.appendingPathComponent("AIUsage", isDirectory: true)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: current.path) { return current }
+        // App: move the old folder so tokens/snapshots/icons keep working.
+        // Sandboxed widget: the move fails, so we keep reading the legacy path
+        // (also listed in widget.entitlements) until the app has migrated it.
+        if fm.fileExists(atPath: legacy.path) {
+            try? fm.moveItem(at: legacy, to: current)
+            if fm.fileExists(atPath: current.path) { return current }
+            return legacy
+        }
+        return current
     }
 
     static var fileURL: URL { directory.appendingPathComponent("snapshot.json") }

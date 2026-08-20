@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
-	<string>ko</string>
+	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>AI 노동청 위젯</string>
+	<string>AI Labor Office Widget</string>
 	<key>CFBundleExecutable</key>
-	<string>AIUsageWidget</string>
+	<string>AI Labor Office Widget</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.mokky.aiusage.widget</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>AIUsageWidget</string>
+	<string>AI Labor Office Widget</string>
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
@@ -25,6 +25,8 @@
 		<key>EXExtensionPointIdentifier</key>
 		<string>com.apple.widgetkit-extension</string>
 	</dict>
+	<key>LSHasLocalizedDisplayName</key>
+	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 </dict>

@@ -86,19 +86,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    /// v2.4 and earlier installed as "AI 노동청.app". ExtensionKit resolves the
-    /// widget appex through a URL in decomposed form (NFD) while LaunchServices
-    /// stores the composed path, so the lookup fails ("not found in LS
-    /// database") and the widgets never reach the gallery. An ASCII bundle
-    /// path sidesteps the normalization mismatch; the Finder name stays Korean
-    /// via ko.lproj/InfoPlist.strings. Old installs (including in-place
-    /// self-updates, which keep the old folder name) move themselves once.
+    /// Korean bundle folder names (v2.4 "AI 노동청.app") break widget lookup:
+    /// ExtensionKit asks LaunchServices with an NFD URL while LS stored NFC.
+    /// The on-disk folder stays ASCII ("AI Labor Office.app"); Finder shows
+    /// "AI 노동청" via ko.lproj. Older installs — including in-place self-
+    /// updates that kept the previous folder name — move themselves once.
     private func migrateToASCIIBundleNameIfNeeded() -> Bool {
         let fm = FileManager.default
         let url = Bundle.main.bundleURL
+        let canonical = "AI Labor Office.app"
         guard url.deletingLastPathComponent().path == "/Applications",
-              url.lastPathComponent != "AIUsage.app" else { return false }
-        let dest = url.deletingLastPathComponent().appendingPathComponent("AIUsage.app")
+              url.lastPathComponent != canonical else { return false }
+        let dest = url.deletingLastPathComponent().appendingPathComponent(canonical)
         try? fm.removeItem(at: dest)   // stale copy from an earlier attempt
         do { try fm.moveItem(at: url, to: dest) } catch { return false }
 
@@ -106,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             + "/LaunchServices.framework/Support/lsregister"
         for args in [["-u", url.path],
                      ["-f", dest.path],
-                     ["-f", dest.path + "/Contents/Extensions/AIUsageWidget.appex"]] {
+                     ["-f", dest.path + "/Contents/Extensions/AI Labor Office Widget.appex"]] {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: lsregister)
             p.arguments = args

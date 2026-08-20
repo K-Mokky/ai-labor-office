@@ -29,12 +29,12 @@
 
 비용·토큰은 로컬 로그에서 집계하지만 **한도 소진율은 로컬 로그로 재현할 수 없습니다** — 한도를 재는 단위가 달러가 아니고 플랜 상한도 디스크에 없기 때문입니다. 그래서 이 값만 프로바이더가 알려주는 수치를 그대로 씁니다. Claude 5h/7d 한도는 Anthropic 계정 단위로 공유되므로 Claude Code·GJC 연결 모두에 동일하게 적용되고, GPT 한도는 Codex 연결에 적용됩니다. Gemini·Cursor·Grok은 읽을 수 있는 공식 한도가 없어 역대 기록 대비로만 표시합니다.
 
-앱이 60초마다 집계해 `~/Library/Application Support/AIUsage/`에 `snapshot.json`(합산, 구버전 호환)과 `widget-data.json`(합산+소스별), `widget-config.json`(위젯 설정)을 저장하고, 위젯은 이 파일들만 읽습니다(샌드박스 read-only 예외). 계정을 연결하면 같은 폴더의 `oauth.json`(0600)에 자체 토큰이 저장됩니다.
+앱이 60초마다 집계해 `~/Library/Application Support/AI Labor Office/`에 `snapshot.json`(합산, 구버전 호환)과 `widget-data.json`(합산+소스별), `widget-config.json`(위젯 설정)을 저장하고, 위젯은 이 파일들만 읽습니다(샌드박스 read-only 예외). 계정을 연결하면 같은 폴더의 `oauth.json`(0600)에 자체 토큰이 저장됩니다. 이전 버전(`AIUsage/`)에 있던 데이터는 첫 실행 때 이 폴더로 이전됩니다.
 
 ## 빌드 & 설치
 
 ```sh
-./build.sh          # build/AIUsage.app 생성 (ad-hoc 서명)
+./build.sh          # build/AI Labor Office.app 생성 (ad-hoc 서명)
 ./build.sh install  # /Applications 에 설치 후 실행 + 위젯 등록 확인
 ./build.sh dmg      # assets/AI-노동청-<버전>.dmg 생성 (배포용)
 ```
@@ -43,17 +43,17 @@
 
 위젯은 앱 첫 실행 후 데스크탑 우클릭 → **위젯 편집** 또는 알림 센터에서 "AI 노동청"으로 추가합니다.
 
-> **번들 폴더명은 ASCII(`AIUsage.app`)여야 합니다.** v2.4까지처럼 폴더명이 한글("AI 노동청.app")이면 ExtensionKit이 위젯 appex를 NFD로 분해된 URL로 LaunchServices에서 조회하다 실패해("not found in LS database") 위젯이 갤러리에 뜨지 않습니다. Finder에 보이는 한글 이름은 `ko.lproj/InfoPlist.strings`가 담당하고, 구버전 경로로 설치된 앱은 실행 시 스스로 `AIUsage.app`으로 이사한 뒤 재시작합니다.
+> **번들 폴더명은 ASCII(`AI Labor Office.app`)여야 합니다.** 폴더명이 한글("AI 노동청.app")이면 ExtensionKit이 위젯 appex를 NFD로 분해된 URL로 LaunchServices에서 조회하다 실패해("not found in LS database") 위젯이 갤러리에 뜨지 않습니다. Finder에 보이는 한글 이름은 `ko.lproj/InfoPlist.strings`가 담당하고, 구버전 경로(`AIUsage.app` 등)로 설치된 앱은 실행 시 스스로 `AI Labor Office.app`으로 이사한 뒤 재시작합니다.
 
 ## 배포 (.dmg)
 
-`./build.sh dmg`가 `Resources/App-Info.plist`의 `CFBundleShortVersionString`을 읽어 `assets/AI-노동청-<버전>.dmg`(로컬 보관용)와 `assets/AI-Nodongcheong-<버전>.dmg`(릴리스 업로드용 ASCII 이름 — 한글 파일명은 GitHub이 지워버림)를 함께 만듭니다. DMG에는 앱과 `/Applications` 심링크가 들어 있어 드래그로 설치합니다. 빌드는 시작 전에 두 plist의 버전이 일치하는지 검사하고, 불일치면 아무것도 지우지 않고 실패합니다.
+`./build.sh dmg`가 `Resources/App-Info.plist`의 `CFBundleShortVersionString`을 읽어 `assets/AI-노동청-<버전>.dmg`(로컬 보관용)와 `assets/AI-Labor-Office-<버전>.dmg`(릴리스 업로드용 ASCII 이름 — 한글 파일명은 GitHub이 지워버림)를 함께 만듭니다. DMG에는 앱과 `/Applications` 심링크가 들어 있어 드래그로 설치합니다. 빌드는 시작 전에 두 plist의 버전이 일치하는지 검사하고, 불일치면 아무것도 지우지 않고 실패합니다.
 
 버전 업데이트 절차:
 
 1. `Resources/App-Info.plist`와 `Resources/Widget-Info.plist`의 `CFBundleShortVersionString`·`CFBundleVersion`을 둘 다 같은 값으로 올린다 (불일치면 빌드가 실패한다).
 2. `./build.sh dmg` 실행 → `assets/`에 한글·ASCII 두 파일이 추가된다 (기존 버전 파일은 그대로 유지).
-3. 커밋 후 푸시하고, 앱 버전과 같은 태그로 릴리스를 만든다: `git tag v<버전> && git push origin main v<버전>` 후 `gh release create v<버전> assets/AI-Nodongcheong-<버전>.dmg`. `.dmg` 에셋이 꼭 있어야 앱 내 업데이트가 동작한다.
+3. 커밋 후 푸시하고, 앱 버전과 같은 태그로 릴리스를 만든다: `git tag v<버전> && git push origin main v<버전>` 후 `gh release create v<버전> assets/AI-Labor-Office-<버전>.dmg`. `.dmg` 에셋이 꼭 있어야 앱 내 업데이트가 동작한다.
 
 앱은 실행 시(및 6시간마다) 최신 릴리스 태그를 확인해서, 현재 버전보다 높으면 DMG를 받아 스스로 교체하고 재시작합니다(`Sources/App/Updater.swift`). 자동 설치는 팝오버 설정에서 끌 수 있습니다.
 
